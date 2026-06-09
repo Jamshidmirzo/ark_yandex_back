@@ -32,6 +32,7 @@ from car_orders.models import (
     CarType,
     DriverShift,
     OrderLiveLocation,
+    OrderMeta,
     VehicleReport,
 )
 from car_orders.serializers import (
@@ -45,6 +46,7 @@ from car_orders.serializers import (
     DriverSerializer,
     DriverShiftSerializer,
     LocationSerializer,
+    OrderMetaSerializer,
     RouteEstimateSerializer,
     ShiftStartSerializer,
     VehicleReportSerializer,
@@ -204,6 +206,30 @@ class LiveLocationView(APIView):
                 {"type": "location.update", "data": data},
             )
         return Response({"lat": loc.lat, "lng": loc.lng, "last_seen": loc.last_seen})
+
+
+class OrderMetaView(APIView):
+    """Local feature overlay for an order (coords / window / trip state), keyed by
+    the demo order id. GET returns it or null; POST upserts the provided fields.
+    AllowAny for now (the frontend sends the driver id). Mounted before the
+    gateway catch-all."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        if not meta:
+            return Response(None)
+        return Response(OrderMetaSerializer(meta).data)
+
+    def post(self, request, pk):
+        serializer = OrderMetaSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        meta, _ = OrderMeta.objects.update_or_create(
+            order_id=pk, defaults=serializer.validated_data
+        )
+        return Response(OrderMetaSerializer(meta).data)
 
 
 class CarOrderViewSet(viewsets.ModelViewSet):

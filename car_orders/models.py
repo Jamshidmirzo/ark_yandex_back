@@ -361,6 +361,59 @@ class OrderLiveLocation(models.Model):
         return f"LiveLocation order={self.order_id} ({self.lat}, {self.lng})"
 
 
+class OrderMeta(TimestampMixin):
+    """Local feature overlay for an order that lives in the demo backend.
+
+    Stores the things demo doesn't have — route A→B coordinates, planned window
+    (start + duration) for the scheduling conflict check, and the richer trip
+    state — keyed by the demo order id.
+    """
+
+    class TripState(models.TextChoices):
+        ASSIGNED = "assigned", _("Assigned")  # claimed into the schedule
+        TO_CLIENT = "to_client", _("Driving to client")
+        AT_CLIENT = "at_client", _("Arrived, waiting for client")
+        IN_TRIP = "in_trip", _("In trip with client")
+        AT_DESTINATION = "at_destination", _("Arrived at destination")
+        WAITING = "waiting", _("On hold (driver stepped away)")
+        COMPLETED = "completed", _("Completed")
+
+    order_id = models.PositiveIntegerField(unique=True, db_index=True, verbose_name=_("Order id"))
+    driver_id = models.PositiveIntegerField(
+        null=True, blank=True, db_index=True, verbose_name=_("Driver user id")
+    )
+    origin_lat = models.FloatField(null=True, blank=True)
+    origin_lng = models.FloatField(null=True, blank=True)
+    address_lat = models.FloatField(null=True, blank=True)
+    address_lng = models.FloatField(null=True, blank=True)
+    estimated_duration = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Estimated duration (minutes)")
+    )
+    service_time = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("On-site time (minutes)")
+    )
+    planned_datetime = models.DateTimeField(null=True, blank=True)
+    latest_start = models.DateTimeField(null=True, blank=True)
+    trip_state = models.CharField(
+        max_length=20, choices=TripState.choices, default=TripState.ASSIGNED
+    )
+
+    class Meta:
+        verbose_name = _("Order meta")
+        verbose_name_plural = _("Order meta")
+
+    def __str__(self):
+        return f"OrderMeta order={self.order_id} [{self.trip_state}]"
+
+    @property
+    def planned_end(self):
+        if self.planned_datetime and self.estimated_duration:
+            from datetime import timedelta
+
+            return self.planned_datetime + timedelta(minutes=self.estimated_duration)
+        return None
+
+
 class VehicleReport(TimestampMixin):
     """Daily condition report a responsible driver files for a car."""
 

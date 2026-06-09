@@ -18,6 +18,7 @@ from django.core.management.base import BaseCommand
 
 from car_orders import services
 from car_orders.management.commands.simulate_driver import _parse_point, _resample
+from car_orders.models import OrderMeta
 
 DEFAULT_FROM = (41.311, 69.240)
 DEFAULT_TO = (41.351, 69.290)
@@ -38,8 +39,20 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         order_id = opts["order"]
-        origin = _parse_point(opts["origin"]) if opts["origin"] else DEFAULT_FROM
-        dest = _parse_point(opts["dest"]) if opts["dest"] else DEFAULT_TO
+        # Priority: explicit --from/--to > the order's saved meta coords > default.
+        meta = OrderMeta.objects.filter(order_id=order_id).first()
+        if opts["origin"]:
+            origin = _parse_point(opts["origin"])
+        elif meta and meta.origin_lat is not None and meta.origin_lng is not None:
+            origin = (meta.origin_lat, meta.origin_lng)
+        else:
+            origin = DEFAULT_FROM
+        if opts["dest"]:
+            dest = _parse_point(opts["dest"])
+        elif meta and meta.address_lat is not None and meta.address_lng is not None:
+            dest = (meta.address_lat, meta.address_lng)
+        else:
+            dest = DEFAULT_TO
         url = f"{opts['base'].rstrip('/')}/api/v1/car-orders/{order_id}/live-location/"
 
         route = services.estimate_route(origin[0], origin[1], dest[0], dest[1])

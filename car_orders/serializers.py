@@ -10,6 +10,7 @@ from car_orders.models import (
     CarOrderActivity,
     CarType,
     DriverShift,
+    OrderMeta,
     VehicleReport,
 )
 
@@ -309,6 +310,30 @@ class RouteEstimateSerializer(serializers.Serializer):
     dest_lat = serializers.FloatField(min_value=-90, max_value=90)
     dest_lng = serializers.FloatField(min_value=-180, max_value=180)
     service_minutes = serializers.IntegerField(min_value=0, required=False)
+
+
+class OrderMetaSerializer(serializers.ModelSerializer):
+    """Local feature overlay for a (demo) order — coords, window, trip state."""
+
+    planned_end = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = OrderMeta
+        fields = [
+            "order_id",
+            "driver_id",
+            "origin_lat",
+            "origin_lng",
+            "address_lat",
+            "address_lng",
+            "estimated_duration",
+            "service_time",
+            "planned_datetime",
+            "latest_start",
+            "trip_state",
+            "planned_end",
+        ]
+        read_only_fields = ["order_id", "planned_end"]
 
 
 class CarOrderActivitySerializer(serializers.ModelSerializer):
