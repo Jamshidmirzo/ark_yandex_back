@@ -191,7 +191,7 @@ class LiveLocationView(APIView):
         geometry = request.data.get("geometry")
         if geometry is not None:
             defaults["geometry"] = geometry
-        loc, _ = OrderLiveLocation.objects.update_or_create(order_id=pk, defaults=defaults)
+        loc, _created = OrderLiveLocation.objects.update_or_create(order_id=pk, defaults=defaults)
 
         # Push the new position to any connected trackers (real-time, no polling).
         layer = get_channel_layer()
@@ -226,7 +226,7 @@ class OrderMetaView(APIView):
     def post(self, request, pk):
         serializer = OrderMetaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        meta, _ = OrderMeta.objects.update_or_create(
+        meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk, defaults=serializer.validated_data
         )
         return Response(OrderMetaSerializer(meta).data)
@@ -267,6 +267,50 @@ class ClaimCheckView(APIView):
         )
 
 
+class OverlayClaimView(APIView):
+    """Claim an order in OUR layer (not demo), so a driver can take a second
+    order with the SAME car sequentially — which the demo backend forbids
+    (one car / one driver per active order). Runs the window conflict check
+    first; on success records driver + car on the OrderMeta. demo stays the
+    source of login/base data."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        driver_id = request.data.get("driver_id")
+        car_id = request.data.get("car_id")
+        car_label = request.data.get("car_label", "")
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        # Window conflict check against the driver's other committed overlay orders.
+        if meta and meta.planned_datetime and meta.estimated_duration:
+            conflict = scheduling.meta_conflict(
+                driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+            )
+            if conflict is not None:
+                return Response(
+                    {
+                        "ok": False,
+                        "conflict": {
+                            "order_id": conflict.order_id,
+                            "planned_start": conflict.planned_datetime,
+                            "planned_end": conflict.planned_end,
+                            "address": f"Заказ #{conflict.order_id}",
+                        },
+                    }
+                )
+        meta, _created = OrderMeta.objects.update_or_create(
+            order_id=pk,
+            defaults={
+                "driver_id": driver_id,
+                "car_id": car_id,
+                "car_label": car_label,
+                "trip_state": OrderMeta.TripState.ASSIGNED,
+            },
+        )
+        return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
+
+
 class TripStateView(APIView):
     """Advance the richer trip state (overlay): to_client / at_client / in_trip /
     at_destination / waiting / completed. Updates OrderMeta and pushes the change
@@ -280,7 +324,7 @@ class TripStateView(APIView):
         valid = {c for c, _ in OrderMeta.TripState.choices}
         if state not in valid:
             return _bad_request("VALIDATION", _("Unknown trip_state."))
-        meta, _ = OrderMeta.objects.update_or_create(
+        meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk, defaults={"trip_state": state}
         )
         layer = get_channel_layer()

@@ -13,6 +13,7 @@ from car_orders.views import (
     EstimateView,
     LiveLocationView,
     OrderMetaView,
+    OverlayClaimView,
     TripStateView,
 )
 from config.gateway import gateway
@@ -35,6 +36,11 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/claim-check/",
         ClaimCheckView.as_view(),
         name="car-order-claim-check",
+    ),
+    path(
+        "api/v1/car-orders/<int:pk>/overlay-claim/",
+        OverlayClaimView.as_view(),
+        name="car-order-overlay-claim",
     ),
     path(
         "api/v1/car-orders/<int:pk>/trip-state/",

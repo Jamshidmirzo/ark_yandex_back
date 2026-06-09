@@ -382,6 +382,10 @@ class OrderMeta(TimestampMixin):
     driver_id = models.PositiveIntegerField(
         null=True, blank=True, db_index=True, verbose_name=_("Driver user id")
     )
+    # Overlay claim: the car the driver took the order with (so a second order
+    # can reuse the same car sequentially, which the demo backend forbids).
+    car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
+    car_label = models.CharField(max_length=255, blank=True, verbose_name=_("Car label"))
     origin_lat = models.FloatField(null=True, blank=True)
     origin_lng = models.FloatField(null=True, blank=True)
     address_lat = models.FloatField(null=True, blank=True)
