@@ -305,6 +305,7 @@ class OverlayClaimView(APIView):
                 "driver_id": driver_id,
                 "car_id": car_id,
                 "car_label": car_label,
+                "overlay_claimed": True,
                 "trip_state": OrderMeta.TripState.ASSIGNED,
             },
         )

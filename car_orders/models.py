@@ -386,6 +386,10 @@ class OrderMeta(TimestampMixin):
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
     car_label = models.CharField(max_length=255, blank=True, verbose_name=_("Car label"))
+    # True ONLY when the order was claimed via OUR layer (overlay-claim), not the
+    # demo claim. Distinguishes "managed by us" from a normal demo claim where we
+    # still record driver_id just for the window check.
+    overlay_claimed = models.BooleanField(default=False, verbose_name=_("Claimed in our layer"))
     origin_lat = models.FloatField(null=True, blank=True)
     origin_lng = models.FloatField(null=True, blank=True)
     address_lat = models.FloatField(null=True, blank=True)

@@ -324,6 +324,7 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "driver_id",
             "car_id",
             "car_label",
+            "overlay_claimed",
             "origin_lat",
             "origin_lng",
             "address_lat",
