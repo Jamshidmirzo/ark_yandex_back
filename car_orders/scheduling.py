@@ -34,7 +34,7 @@ def meta_conflict(driver_id, start, end, exclude_order_id=None, buffer=None):
         buffer = travel_buffer()
     lo, hi = start - buffer, end + buffer
     qs = OrderMeta.objects.filter(driver_id=driver_id).exclude(
-        trip_state=OrderMeta.TripState.COMPLETED
+        trip_state__in=(OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
     )
     if exclude_order_id is not None:
         qs = qs.exclude(order_id=exclude_order_id)

@@ -377,6 +377,7 @@ class OrderMeta(TimestampMixin):
         AT_DESTINATION = "at_destination", _("Arrived at destination")
         WAITING = "waiting", _("On hold (driver stepped away)")
         COMPLETED = "completed", _("Completed")
+        CANCELLED = "cancelled", _("Cancelled / released")
 
     order_id = models.PositiveIntegerField(unique=True, db_index=True, verbose_name=_("Order id"))
     driver_id = models.PositiveIntegerField(

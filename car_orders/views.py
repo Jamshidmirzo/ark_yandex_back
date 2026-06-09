@@ -281,7 +281,19 @@ class OverlayClaimView(APIView):
         driver_id = request.data.get("driver_id")
         car_id = request.data.get("car_id")
         car_label = request.data.get("car_label", "")
+        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
         meta = OrderMeta.objects.filter(order_id=pk).first()
+        # Already taken by a DIFFERENT driver and still active → reject.
+        if (
+            meta
+            and meta.overlay_claimed
+            and meta.trip_state not in terminal
+            and meta.driver_id is not None
+            and str(meta.driver_id) != str(driver_id)
+        ):
+            return _bad_request(
+                "ALREADY_CLAIMED", _("This order is already taken by another driver.")
+            )
         # Window conflict check against the driver's other committed overlay orders.
         if meta and meta.planned_datetime and meta.estimated_duration:
             conflict = scheduling.meta_conflict(
@@ -299,6 +311,8 @@ class OverlayClaimView(APIView):
                         },
                     }
                 )
+        # Don't rewind an in-progress trip on a double-tap; only (re)start from a
+        # fresh/terminal state.
         meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk,
             defaults={
@@ -306,9 +320,11 @@ class OverlayClaimView(APIView):
                 "car_id": car_id,
                 "car_label": car_label,
                 "overlay_claimed": True,
-                "trip_state": OrderMeta.TripState.ASSIGNED,
             },
         )
+        if _created or meta.trip_state in terminal:
+            meta.trip_state = OrderMeta.TripState.ASSIGNED
+            meta.save(update_fields=["trip_state"])
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -322,9 +338,16 @@ class TripStateView(APIView):
 
     def post(self, request, pk):
         state = request.data.get("trip_state")
-        valid = {c for c, _ in OrderMeta.TripState.choices}
+        valid = {c for c, _label in OrderMeta.TripState.choices}
         if state not in valid:
             return _bad_request("VALIDATION", _("Unknown trip_state."))
+        existing = OrderMeta.objects.filter(order_id=pk).first()
+        if (
+            existing
+            and existing.trip_state == OrderMeta.TripState.COMPLETED
+            and state != OrderMeta.TripState.COMPLETED
+        ):
+            return _bad_request("INVALID_STATUS", _("This order is already completed."))
         meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk, defaults={"trip_state": state}
         )
@@ -337,6 +360,36 @@ class TripStateView(APIView):
                 {"type": "location.update", "data": {"trip_state": state}},
             )
         return Response(OrderMetaSerializer(meta).data)
+
+
+class OverlayReleaseView(APIView):
+    """Tear down the overlay for an order — call it on demo reject / cancel /
+    release / reassign / done. Clears the claim so the order stops blocking the
+    driver's schedule and the auto-simulator, and pushes a ``cancelled`` state
+    over the WebSocket. Idempotent."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        if meta is None:
+            return Response({"ok": True})
+        meta.overlay_claimed = False
+        meta.driver_id = None
+        meta.car_id = None
+        meta.car_label = ""
+        meta.trip_state = OrderMeta.TripState.CANCELLED
+        meta.save()
+        layer = get_channel_layer()
+        if layer is not None:
+            from car_orders.ws import group_name
+
+            async_to_sync(layer.group_send)(
+                group_name(pk),
+                {"type": "location.update", "data": {"trip_state": "cancelled"}},
+            )
+        return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
 class CarOrderViewSet(viewsets.ModelViewSet):

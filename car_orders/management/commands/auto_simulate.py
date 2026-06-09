@@ -33,8 +33,14 @@ class Command(BaseCommand):
         steps = max(2, opts["steps"])
         poll = opts["poll"]
 
+        # Only drive orders that are genuinely moving (driver en route / in trip).
+        # Stopped stages (assigned / at_client / waiting / at_destination) and dead
+        # ones (completed / cancelled) stay put.
+        moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
+
         routes: dict[int, list] = {}
         progress: dict[int, int] = {}
+        route_coords: dict[int, tuple] = {}  # detect A→B coord changes → re-route
         active: list = []
         last_scan = -1e9
 
@@ -48,6 +54,11 @@ class Command(BaseCommand):
             except requests.RequestException:
                 pass
 
+        def forget(oid):
+            routes.pop(oid, None)
+            progress.pop(oid, None)
+            route_coords.pop(oid, None)
+
         while True:
             now = time.monotonic()
             if now - last_scan >= poll:
@@ -59,23 +70,38 @@ class Command(BaseCommand):
                         origin_lng__isnull=False,
                         address_lat__isnull=False,
                         address_lng__isnull=False,
-                    ).exclude(trip_state=OrderMeta.TripState.COMPLETED)
+                        trip_state__in=moving,
+                    )
                 )
+                active_ids = {m.order_id for m in active}
+                for oid in list(routes):
+                    if oid not in active_ids:
+                        forget(oid)
                 for m in active:
                     oid = m.order_id
-                    if oid in routes:
+                    key = (m.origin_lat, m.origin_lng, m.address_lat, m.address_lng)
+                    if oid in routes and route_coords.get(oid) == key:
                         continue
-                    route = services.estimate_route(
-                        m.origin_lat, m.origin_lng, m.address_lat, m.address_lng
-                    )
+                    route = services.estimate_route(*key)
                     routes[oid] = _resample(route["geometry"], steps)
                     progress[oid] = 0
+                    route_coords[oid] = key
                     first = route["geometry"][0]
                     post(oid, {"lat": first[1], "lng": first[0], "geometry": route["geometry"]})
                     self.stdout.write(f"  + order {oid}: driving {len(routes[oid])} points")
 
             for m in active:
                 oid = m.order_id
+                # Re-read live state so a manual stage change / teardown stops the
+                # marker immediately, not after a full poll.
+                state = (
+                    OrderMeta.objects.filter(order_id=oid)
+                    .values_list("trip_state", flat=True)
+                    .first()
+                )
+                if state not in moving:
+                    forget(oid)
+                    continue
                 path = routes.get(oid)
                 idx = progress.get(oid, 0)
                 if not path or idx >= len(path):

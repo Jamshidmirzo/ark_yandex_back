@@ -14,6 +14,7 @@ from car_orders.views import (
     LiveLocationView,
     OrderMetaView,
     OverlayClaimView,
+    OverlayReleaseView,
     TripStateView,
 )
 from config.gateway import gateway
@@ -41,6 +42,11 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/overlay-claim/",
         OverlayClaimView.as_view(),
         name="car-order-overlay-claim",
+    ),
+    path(
+        "api/v1/car-orders/<int:pk>/overlay-release/",
+        OverlayReleaseView.as_view(),
+        name="car-order-overlay-release",
     ),
     path(
         "api/v1/car-orders/<int:pk>/trip-state/",
