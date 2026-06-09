@@ -12,6 +12,7 @@ from car_orders.views import (
     ClaimCheckView,
     EstimateView,
     LiveLocationView,
+    MyOverlayOrdersView,
     OrderMetaView,
     OverlayClaimView,
     OverlayReleaseView,
@@ -27,6 +28,11 @@ urlpatterns = [
     # Must come BEFORE the gateway catch-all. login/drivers/garage/car-orders
     # stay proxied to the real backend.
     path("api/v1/car-orders/estimate/", EstimateView.as_view(), name="car-order-estimate"),
+    path(
+        "api/v1/car-orders/drivers/me/overlay-orders/",
+        MyOverlayOrdersView.as_view(),
+        name="car-order-my-overlay-orders",
+    ),
     path(
         "api/v1/car-orders/<int:pk>/live-location/",
         LiveLocationView.as_view(),

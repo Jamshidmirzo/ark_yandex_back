@@ -392,6 +392,28 @@ class OverlayReleaseView(APIView):
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
+class MyOverlayOrdersView(APIView):
+    """A driver's active orders from our overlay (both demo-claimed and
+    overlay-claimed have driver_id on OrderMeta). Powers the «Мои заказы» page.
+    ``?driver_id=X`` (the frontend passes the logged-in user id)."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        driver_id = request.query_params.get("driver_id")
+        if not driver_id:
+            return Response([])
+        qs = (
+            OrderMeta.objects.filter(driver_id=driver_id)
+            .exclude(
+                trip_state__in=(OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+            )
+            .order_by("planned_datetime", "order_id")
+        )
+        return Response(OrderMetaSerializer(qs, many=True).data)
+
+
 class CarOrderViewSet(viewsets.ModelViewSet):
     """CRUD + workflow actions for car orders."""
 
