@@ -267,6 +267,33 @@ class ClaimCheckView(APIView):
         )
 
 
+class TripStateView(APIView):
+    """Advance the richer trip state (overlay): to_client / at_client / in_trip /
+    at_destination / waiting / completed. Updates OrderMeta and pushes the change
+    over the order's WebSocket so the client/dispatcher see it live."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        state = request.data.get("trip_state")
+        valid = {c for c, _ in OrderMeta.TripState.choices}
+        if state not in valid:
+            return _bad_request("VALIDATION", _("Unknown trip_state."))
+        meta, _ = OrderMeta.objects.update_or_create(
+            order_id=pk, defaults={"trip_state": state}
+        )
+        layer = get_channel_layer()
+        if layer is not None:
+            from car_orders.ws import group_name
+
+            async_to_sync(layer.group_send)(
+                group_name(pk),
+                {"type": "location.update", "data": {"trip_state": state}},
+            )
+        return Response(OrderMetaSerializer(meta).data)
+
+
 class CarOrderViewSet(viewsets.ModelViewSet):
     """CRUD + workflow actions for car orders."""
 
