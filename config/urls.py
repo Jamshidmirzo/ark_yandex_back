@@ -8,7 +8,7 @@ from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path, re_path
 
-from car_orders.views import EstimateView, LiveLocationView, OrderMetaView
+from car_orders.views import ClaimCheckView, EstimateView, LiveLocationView, OrderMetaView
 from config.gateway import gateway
 from core.views import health
 
@@ -25,6 +25,11 @@ urlpatterns = [
         name="car-order-live-location",
     ),
     path("api/v1/car-orders/<int:pk>/meta/", OrderMetaView.as_view(), name="car-order-meta"),
+    path(
+        "api/v1/car-orders/<int:pk>/claim-check/",
+        ClaimCheckView.as_view(),
+        name="car-order-claim-check",
+    ),
     # Transparent gateway → real DEV backend (demo.ark.glob.uz). Keep last.
     re_path(r"^api/v1/(?P<path>.*)$", gateway, name="gateway"),
 ]

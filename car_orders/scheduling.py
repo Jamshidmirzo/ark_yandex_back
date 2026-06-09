@@ -14,10 +14,37 @@ from datetime import timedelta
 
 from django.conf import settings
 
-from car_orders.models import CarOrder
+from car_orders.models import CarOrder, OrderMeta
 
 # Statuses that occupy a slot in the driver's calendar.
 COMMITTED_STATUSES = (CarOrder.Status.SCHEDULED, CarOrder.Status.IN_PROGRESS)
+
+
+def meta_conflict(driver_id, start, end, exclude_order_id=None, buffer=None):
+    """Overlay scheduling check (hybrid/gateway setup): does ``[start, end]``
+    (expanded by ``buffer``) overlap any of the driver's other committed
+    :class:`OrderMeta` windows? Returns the conflicting meta or ``None``.
+
+    Used when orders live in the demo backend but their windows + driver
+    assignment are tracked locally in OrderMeta.
+    """
+    if driver_id is None or start is None or end is None:
+        return None
+    if buffer is None:
+        buffer = travel_buffer()
+    lo, hi = start - buffer, end + buffer
+    qs = OrderMeta.objects.filter(driver_id=driver_id).exclude(
+        trip_state=OrderMeta.TripState.COMPLETED
+    )
+    if exclude_order_id is not None:
+        qs = qs.exclude(order_id=exclude_order_id)
+    for m in qs:
+        o_start, o_end = m.planned_datetime, m.planned_end
+        if o_start is None or o_end is None:
+            continue
+        if lo < o_end and o_start < hi:  # half-open interval overlap
+            return m
+    return None
 
 
 def travel_buffer() -> timedelta:

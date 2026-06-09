@@ -232,6 +232,41 @@ class OrderMetaView(APIView):
         return Response(OrderMetaSerializer(meta).data)
 
 
+class ClaimCheckView(APIView):
+    """Scheduling pre-check before a driver claims an order (overlay/hybrid).
+
+    Body: ``{driver_id}``. Reads the order's saved window from OrderMeta and
+    checks it against the driver's other committed orders (+ travel buffer).
+    Returns ``{ok, conflict}`` — so a driver CAN take a second order when it fits
+    a free gap, instead of a blanket "you already have an order"."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        driver_id = request.data.get("driver_id")
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        # No saved window → nothing to schedule against; allow.
+        if not meta or not meta.planned_datetime or not meta.estimated_duration:
+            return Response({"ok": True, "conflict": None})
+        conflict = scheduling.meta_conflict(
+            driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+        )
+        if conflict is None:
+            return Response({"ok": True, "conflict": None})
+        return Response(
+            {
+                "ok": False,
+                "conflict": {
+                    "order_id": conflict.order_id,
+                    "planned_start": conflict.planned_datetime,
+                    "planned_end": conflict.planned_end,
+                    "address": f"Заказ #{conflict.order_id}",
+                },
+            }
+        )
+
+
 class CarOrderViewSet(viewsets.ModelViewSet):
     """CRUD + workflow actions for car orders."""
 
