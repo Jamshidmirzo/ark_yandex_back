@@ -1,0 +1,7 @@
+-r requirements.txt
+
+ruff>=0.12,<0.13
+black>=25.1,<26.0
+pytest>=8.4,<9.0
+pytest-django>=4.11,<5.0
+django-debug-toolbar>=5.2,<6.0

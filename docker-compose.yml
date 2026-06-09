@@ -1,0 +1,34 @@
+# Our own stack (ark_yandex backend + ark_yandex_front), Dockerized.
+# Run from this folder:  docker compose up --build
+services:
+  backend:
+    build:
+      context: .
+    image: ark-yandex-backend
+    environment:
+      # Persisted SQLite on a named volume (survives restarts).
+      DATABASE_URL: sqlite:////data/db.sqlite3
+      # CORS for the dockerized frontend (served at :5173) + native vite dev.
+      CORS_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # Real backend (DEV/demo) — ALL /api/v1/* is reverse-proxied here
+      # (real accounts, drivers, car orders). Change to repoint the whole app.
+      UPSTREAM_API_BASE: https://demo.ark.glob.uz/ru/api/v1
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/data
+
+  frontend:
+    build:
+      context: ../ark_yandex_front
+      args:
+        # Browser → backend's published port.
+        VITE_API_BASE_URL: http://localhost:8000/api/v1
+    image: ark-yandex-front
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend_data:
