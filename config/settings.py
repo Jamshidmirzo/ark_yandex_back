@@ -191,6 +191,9 @@ CORS_ALLOW_CREDENTIALS = True
 # credentials keep working. Direct curl/Postman calls don't need this.
 if DEBUG:
     CORS_ALLOWED_ORIGIN_REGEXES = [
+        # Any local dev port — vite picks 5174+ when 5173 is taken (e.g. by the
+        # dockerized frontend), which would otherwise be CORS-blocked.
+        r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
         r"^http://192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$",
         r"^http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$",
         r"^http://172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(:\d+)?$",
