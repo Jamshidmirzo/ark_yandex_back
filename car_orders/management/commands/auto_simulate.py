@@ -1,11 +1,20 @@
-"""Auto-drive the live location of EVERY active order. Start once and leave it
-running — it picks up new orders automatically, so you never run a per-order
-``simulate_location`` again.
+"""Auto-drive the live location of every active order — driver-centric and
+phase-aware, so the simulator mirrors what the mobile app will stream.
 
-An order is "active" when our overlay (OrderMeta) has a driver assigned, the
-trip isn't completed, and it has A→B coordinates. Each active order is advanced
-one step along its route every ``--interval`` seconds; new orders are discovered
-every ``--poll`` seconds.
+Start once and leave it running; it picks up new orders automatically. For each
+driver it drives the order that is currently *moving*, choosing the right leg by
+trip stage:
+
+  - ``to_client``: from the driver's CURRENT position → the **pickup** (origin).
+    This is also the "empty" leg **between two orders** — after finishing order 1
+    at its destination, the driver heads to order 2's pickup, and you see it.
+  - ``in_trip``: from the **pickup** (origin) → the **destination** (address).
+
+Stopped stages (``assigned`` / ``at_client`` / ``waiting`` / ``at_destination``)
+and dead ones (``completed`` / ``cancelled``) stay put. The driver's position is
+remembered across orders (one car = one position), so the inter-order leg starts
+where the previous order left them; on a fresh start it's seeded from the
+driver's last stored live-location.
 """
 
 import time
@@ -15,11 +24,45 @@ from django.core.management.base import BaseCommand
 
 from car_orders import services
 from car_orders.management.commands.simulate_driver import _resample
-from car_orders.models import OrderMeta
+from car_orders.models import OrderLiveLocation, OrderMeta
+
+# Stages where the car is actually moving (and we animate it).
+MOVING = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
+# When a driver somehow has more than one moving order at once (a car is only in
+# one place), animate just one — prefer the loaded leg over the approach.
+_MOVING_PRIORITY = {OrderMeta.TripState.IN_TRIP: 0, OrderMeta.TripState.TO_CLIENT: 1}
+
+
+def one_moving_order_per_driver(orders):
+    """Collapse moving orders to at most one per driver: the loaded leg (``in_trip``)
+    wins over the approach (``to_client``), then the most-recently-updated. Keeps
+    ``driver_pos`` (one car = one position) from being clobbered by a second order."""
+    best: dict[int, object] = {}
+
+    def rank(m):
+        return (_MOVING_PRIORITY.get(m.trip_state, 9), -m.updated_at.timestamp())
+
+    for m in orders:
+        cur = best.get(m.driver_id)
+        if cur is None or rank(m) < rank(cur):
+            best[m.driver_id] = m
+    return list(best.values())
+
+
+def leg_endpoints(state, driver_pos, origin, dest):
+    """``(start, end)`` ``[lng, lat]`` for the current moving leg.
+
+    - ``to_client`` → drive from the driver's current position to the pickup
+      (``origin``); if the position is unknown, start at the pickup (no approach).
+    - ``in_trip`` → drive the loaded leg pickup → destination (always).
+    """
+    if state == OrderMeta.TripState.TO_CLIENT:
+        return (list(driver_pos) if driver_pos else list(origin)), list(origin)
+    return list(origin), list(dest)
 
 
 class Command(BaseCommand):
-    help = "Continuously auto-drive every active order's live location."
+    help = "Continuously auto-drive every active order's live location (phase-aware)."
 
     def add_arguments(self, parser):
         parser.add_argument("--interval", type=float, default=1.5, help="Seconds between steps.")
@@ -33,18 +76,16 @@ class Command(BaseCommand):
         steps = max(2, opts["steps"])
         poll = opts["poll"]
 
-        # Only drive orders that are genuinely moving (driver en route / in trip).
-        # Stopped stages (assigned / at_client / waiting / at_destination) and dead
-        # ones (completed / cancelled) stay put.
-        moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
-
-        routes: dict[int, list] = {}
-        progress: dict[int, int] = {}
-        route_coords: dict[int, tuple] = {}  # detect A→B coord changes → re-route
+        seg_route: dict[int, list] = {}    # oid -> resampled [lng,lat] path of the current leg
+        seg_progress: dict[int, int] = {}  # oid -> index along that path
+        seg_key: dict[int, tuple] = {}     # oid -> (state, end_lng, end_lat) leg identity
+        driver_pos: dict[int, list] = {}   # driver_id -> current [lng, lat] (one car)
         active: list = []
         last_scan = -1e9
 
-        self.stdout.write(self.style.SUCCESS("Auto-simulator running — Ctrl-C to stop."))
+        self.stdout.write(
+            self.style.SUCCESS("Auto-simulator (phase-aware) running — Ctrl-C to stop.")
+        )
 
         def post(oid, body):
             try:
@@ -55,59 +96,91 @@ class Command(BaseCommand):
                 pass
 
         def forget(oid):
-            routes.pop(oid, None)
-            progress.pop(oid, None)
-            route_coords.pop(oid, None)
+            seg_route.pop(oid, None)
+            seg_progress.pop(oid, None)
+            seg_key.pop(oid, None)
+
+        def seed_pos(driver_id):
+            """Driver's last known position so the inter-order leg survives a
+            simulator restart: the most recent live-location among their orders."""
+            oids = list(
+                OrderMeta.objects.filter(driver_id=driver_id).values_list("order_id", flat=True)
+            )
+            loc = (
+                OrderLiveLocation.objects.filter(order_id__in=oids).order_by("-last_seen").first()
+            )
+            return [loc.lng, loc.lat] if loc else None
 
         while True:
             now = time.monotonic()
             if now - last_scan >= poll:
                 last_scan = now
-                active = list(
+                active = one_moving_order_per_driver(
                     OrderMeta.objects.filter(
                         driver_id__isnull=False,
                         origin_lat__isnull=False,
                         origin_lng__isnull=False,
                         address_lat__isnull=False,
                         address_lng__isnull=False,
-                        trip_state__in=moving,
+                        trip_state__in=MOVING,
                     )
                 )
                 active_ids = {m.order_id for m in active}
-                for oid in list(routes):
+                for oid in list(seg_route):
                     if oid not in active_ids:
                         forget(oid)
-                for m in active:
-                    oid = m.order_id
-                    key = (m.origin_lat, m.origin_lng, m.address_lat, m.address_lng)
-                    if oid in routes and route_coords.get(oid) == key:
-                        continue
-                    route = services.estimate_route(*key)
-                    routes[oid] = _resample(route["geometry"], steps)
-                    progress[oid] = 0
-                    route_coords[oid] = key
-                    first = route["geometry"][0]
-                    post(oid, {"lat": first[1], "lng": first[0], "geometry": route["geometry"]})
-                    self.stdout.write(f"  + order {oid}: driving {len(routes[oid])} points")
 
             for m in active:
                 oid = m.order_id
-                # Re-read live state so a manual stage change / teardown stops the
-                # marker immediately, not after a full poll.
-                state = (
+                drv = m.driver_id
+                # Re-read live state AND coords together, so a manual stage change /
+                # teardown stops the marker immediately and a moved pickup/destination
+                # re-routes — instead of driving the cached (stale) coordinates.
+                row = (
                     OrderMeta.objects.filter(order_id=oid)
-                    .values_list("trip_state", flat=True)
+                    .values_list(
+                        "trip_state", "origin_lng", "origin_lat", "address_lng", "address_lat"
+                    )
                     .first()
                 )
-                if state not in moving:
+                if row is None:
                     forget(oid)
                     continue
-                path = routes.get(oid)
-                idx = progress.get(oid, 0)
+                state, o_lng, o_lat, a_lng, a_lat = row
+                if state not in MOVING or None in (o_lng, o_lat, a_lng, a_lat):
+                    forget(oid)
+                    continue
+
+                origin = [o_lng, o_lat]
+                dest = [a_lng, a_lat]
+                start, end = leg_endpoints(
+                    state, driver_pos.get(drv) or seed_pos(drv), origin, dest
+                )
+
+                # Leg identity is the stage + its endpoint; it does NOT include the
+                # live position, so the route is built once and not re-routed as
+                # the marker advances. A stage change (different end) rebuilds it.
+                key = (state, round(end[0], 6), round(end[1], 6))
+                if seg_key.get(oid) != key:
+                    route = services.estimate_route(start[1], start[0], end[1], end[0])
+                    geom = route["geometry"]
+                    seg_route[oid] = _resample(geom, steps)
+                    seg_progress[oid] = 0
+                    seg_key[oid] = key
+                    first = seg_route[oid][0]
+                    driver_pos[drv] = [first[0], first[1]]
+                    post(oid, {"lat": first[1], "lng": first[0], "geometry": geom})
+                    leg = "→ подача" if state == OrderMeta.TripState.TO_CLIENT else "с клиентом"
+                    self.stdout.write(f"  + order {oid} ({leg}): {len(seg_route[oid])} points")
+                    continue
+
+                path = seg_route.get(oid)
+                idx = seg_progress.get(oid, 0)
                 if not path or idx >= len(path):
-                    continue  # not ready, or already arrived (stays put)
+                    continue  # arrived → stays put until the driver advances the stage
                 lng, lat = path[idx]
                 post(oid, {"lat": lat, "lng": lng})
-                progress[oid] = idx + 1
+                driver_pos[drv] = [lng, lat]
+                seg_progress[oid] = idx + 1
 
             time.sleep(interval)

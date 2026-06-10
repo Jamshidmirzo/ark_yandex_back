@@ -88,3 +88,21 @@ Poll every 3 s if you don’t use the WebSocket.
 If the order has `meta` with A→B coordinates, the route is computed automatically (see
 [03](03-scheduling-overlay.md) → `estimate`). With no coordinates, tracking shows only the driver
 dot without a line. So **save the coordinates to `meta`** when creating the order.
+
+## 4.3 Simulator (testing without a phone)
+`python manage.py auto_simulate` continuously drives every active order — like the mobile app will.
+It is **driver-centric and phase-aware**: one driver = one car = one position, which **carries across
+orders**:
+
+- stage `to_client` — drives from the **driver's current position** to the **pickup** (origin). This
+  is also the "empty" leg **between orders**: after finishing order 1 at its destination the driver
+  heads to order 2's pickup, and you **see** it on the map;
+- stage `in_trip` — drives from the **pickup** (origin) to the **destination** (address).
+
+Stopped stages (`assigned`/`at_client`/`waiting`/`at_destination`) and terminal ones
+(`completed`/`cancelled`) stay put. The position survives a simulator restart (seeded from the
+driver's last stored live-location).
+
+> Transparent to the mobile app: the phone just streams **real GPS** (section 4 above) and the driver
+> advances stages with buttons (`trip-state/`). The simulator only mimics that same stream so wiring
+> the real app brings no surprises.
