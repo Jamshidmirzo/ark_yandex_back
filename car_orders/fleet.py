@@ -13,9 +13,9 @@ TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
 
 
 def fleet_live_orders():
-    metas = list(
-        OrderMeta.objects.filter(driver_id__isnull=False).exclude(trip_state__in=TERMINAL)
-    )
+    # Every non-terminal overlay order, INCLUDING ones still awaiting a driver
+    # (driver_id is None) — the dispatcher needs to see those to assign them.
+    metas = list(OrderMeta.objects.exclude(trip_state__in=TERMINAL))
     # Index started trips per driver ONCE, so each order's at_risk is computed in
     # memory instead of a query per order (no N+1 over the fleet).
     active_by_driver: dict = {}
