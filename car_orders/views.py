@@ -407,6 +407,21 @@ class TripStateView(APIView):
             and state != OrderMeta.TripState.COMPLETED
         ):
             return _bad_request("INVALID_STATUS", _("This order is already completed."))
+        # One active trip per driver: don't let a driver START this order while
+        # another is still being driven (a driver is in one car / one place). Only
+        # checked on the transition INTO a started stage from a non-started one.
+        if (
+            existing
+            and existing.driver_id is not None
+            and state in scheduling.STARTED_STATES
+            and existing.trip_state not in scheduling.STARTED_STATES
+        ):
+            other = scheduling.meta_active_trip(existing.driver_id, exclude_order_id=int(pk))
+            if other is not None:
+                return _bad_request(
+                    "ACTIVE_TRIP_EXISTS",
+                    _("Finish the current trip before starting another."),
+                )
         meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk, defaults={"trip_state": state}
         )

@@ -126,7 +126,7 @@ def needs_reassign(order, now):
 
 # Trip stages where the driver is actively executing an order (between accepting
 # and finishing) — these occupy the driver "now".
-_STARTED_STATES = (
+STARTED_STATES = (
     OrderMeta.TripState.TO_CLIENT,
     OrderMeta.TripState.AT_CLIENT,
     OrderMeta.TripState.IN_TRIP,
@@ -139,7 +139,7 @@ def meta_active_trip(driver_id, exclude_order_id=None):
     """The driver's currently-executing overlay order (started, not terminal)."""
     if driver_id is None:
         return None
-    qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=_STARTED_STATES)
+    qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=STARTED_STATES)
     if exclude_order_id is not None:
         qs = qs.exclude(order_id=exclude_order_id)
     return qs.first()

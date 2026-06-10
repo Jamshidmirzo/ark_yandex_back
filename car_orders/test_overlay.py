@@ -6,8 +6,10 @@ Kept separate from ``tests.py`` whose ``env`` fixture logs in through the gatewa
 (unreachable here)."""
 
 from datetime import timedelta
+from io import StringIO
 
 import pytest
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -178,3 +180,52 @@ def test_live_location_cleared_on_reassign():
     r = client.post("/api/v1/car-orders/611/reassign/", {}, format="json")
     assert r.status_code == 200, r.content
     assert not OrderLiveLocation.objects.filter(order_id=611).exists()
+
+
+@pytest.mark.django_db
+def test_cannot_start_second_trip_while_one_is_active():
+    """A driver in one car/one place can't START a second order while another is
+    already being driven."""
+    client = APIClient()
+    OrderMeta.objects.create(
+        order_id=630, driver_id=15, overlay_claimed=True, trip_state=OrderMeta.TripState.IN_TRIP
+    )
+    OrderMeta.objects.create(
+        order_id=631, driver_id=15, overlay_claimed=True, trip_state=OrderMeta.TripState.ASSIGNED
+    )
+    r = client.post(
+        "/api/v1/car-orders/631/trip-state/", {"trip_state": "to_client"}, format="json"
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "ACTIVE_TRIP_EXISTS"
+    # advancing the already-started first order still works
+    r2 = client.post(
+        "/api/v1/car-orders/630/trip-state/", {"trip_state": "at_destination"}, format="json"
+    )
+    assert r2.status_code == 200, r2.content
+
+
+@pytest.mark.django_db
+def test_order_watchdog_release_frees_late_unstarted_but_not_active():
+    now = timezone.now()
+    OrderMeta.objects.create(  # late, accepted, not started → should be released
+        order_id=640,
+        driver_id=16,
+        overlay_claimed=True,
+        planned_datetime=now - timedelta(hours=1),
+        estimated_duration=60,
+        trip_state=OrderMeta.TripState.ASSIGNED,
+    )
+    OrderMeta.objects.create(  # mid-trip → must NOT be yanked
+        order_id=641,
+        driver_id=17,
+        overlay_claimed=True,
+        planned_datetime=now - timedelta(hours=1),
+        estimated_duration=60,
+        trip_state=OrderMeta.TripState.IN_TRIP,
+    )
+    call_command("order_watchdog", "--release", stdout=StringIO())
+    m640 = OrderMeta.objects.get(order_id=640)
+    m641 = OrderMeta.objects.get(order_id=641)
+    assert m640.overlay_claimed is False and m640.driver_id is None
+    assert m641.overlay_claimed is True and m641.driver_id == 17
