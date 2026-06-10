@@ -11,7 +11,8 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from car_orders.models import OrderMeta
+from car_orders import scheduling
+from car_orders.models import OrderLiveLocation, OrderMeta
 
 
 @pytest.mark.django_db
@@ -107,3 +108,73 @@ def test_reassign_missing_meta_is_bad_request():
     client = APIClient()
     r = client.post("/api/v1/car-orders/888/reassign/", {}, format="json")
     assert r.status_code == 400
+
+
+@pytest.mark.django_db
+def test_meta_needs_reassign_when_current_trip_overruns():
+    """The driver's current trip is overrunning → the next order's projected start
+    blows past its latest_start, so it's at risk and should be reassigned."""
+    now = timezone.now()
+    OrderMeta.objects.create(  # current trip, due to finish 1h ago, still in progress
+        order_id=601,
+        driver_id=11,
+        planned_datetime=now - timedelta(hours=2),
+        estimated_duration=60,
+        overlay_claimed=True,
+        trip_state=OrderMeta.TripState.IN_TRIP,
+    )
+    nxt = OrderMeta.objects.create(
+        order_id=602,
+        driver_id=11,
+        planned_datetime=now,
+        estimated_duration=60,
+        latest_start=now - timedelta(minutes=10),
+        overlay_claimed=True,
+        trip_state=OrderMeta.TripState.ASSIGNED,
+    )
+    assert scheduling.meta_needs_reassign(nxt, now) is True
+    nxt.latest_start = now + timedelta(hours=5)
+    nxt.save(update_fields=["latest_start"])
+    assert scheduling.meta_needs_reassign(nxt, now) is False
+
+
+@pytest.mark.django_db
+def test_at_risk_and_is_late_exposed_in_meta():
+    """The overlay serializer exposes at_risk / is_late so the UI can flag it."""
+    client = APIClient()
+    now = timezone.now()
+    OrderMeta.objects.create(
+        order_id=620,
+        driver_id=13,
+        planned_datetime=now - timedelta(minutes=20),  # pickup time already passed
+        estimated_duration=60,
+        overlay_claimed=True,
+        trip_state=OrderMeta.TripState.ASSIGNED,  # accepted but not departed
+    )
+    data = client.get("/api/v1/car-orders/620/meta/").json()
+    assert data["is_late"] is True
+    assert "at_risk" in data
+
+
+@pytest.mark.django_db
+def test_live_location_cleared_on_terminal_trip_state():
+    client = APIClient()
+    OrderMeta.objects.create(order_id=610, driver_id=12, trip_state=OrderMeta.TripState.IN_TRIP)
+    OrderLiveLocation.objects.create(order_id=610, lat=41.3, lng=69.2, last_seen=timezone.now())
+    r = client.post(
+        "/api/v1/car-orders/610/trip-state/", {"trip_state": "completed"}, format="json"
+    )
+    assert r.status_code == 200, r.content
+    assert not OrderLiveLocation.objects.filter(order_id=610).exists()
+
+
+@pytest.mark.django_db
+def test_live_location_cleared_on_reassign():
+    client = APIClient()
+    OrderMeta.objects.create(
+        order_id=611, driver_id=12, overlay_claimed=True, trip_state=OrderMeta.TripState.IN_TRIP
+    )
+    OrderLiveLocation.objects.create(order_id=611, lat=41.3, lng=69.2, last_seen=timezone.now())
+    r = client.post("/api/v1/car-orders/611/reassign/", {}, format="json")
+    assert r.status_code == 200, r.content
+    assert not OrderLiveLocation.objects.filter(order_id=611).exists()

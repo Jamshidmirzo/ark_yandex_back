@@ -117,3 +117,53 @@ def needs_reassign(order, now):
         return False
     ps = projected_start(order, now)
     return ps is not None and ps > order.latest_start
+
+
+# --- Overlay (OrderMeta) variants — hybrid/gateway setup --------------------
+# The functions above act on the demo CarOrder; in the hybrid setup the windows
+# and driver assignment live in OrderMeta, so we mirror the overrun/at-risk logic
+# on the overlay.
+
+# Trip stages where the driver is actively executing an order (between accepting
+# and finishing) — these occupy the driver "now".
+_STARTED_STATES = (
+    OrderMeta.TripState.TO_CLIENT,
+    OrderMeta.TripState.AT_CLIENT,
+    OrderMeta.TripState.IN_TRIP,
+    OrderMeta.TripState.AT_DESTINATION,
+    OrderMeta.TripState.WAITING,
+)
+
+
+def meta_active_trip(driver_id, exclude_order_id=None):
+    """The driver's currently-executing overlay order (started, not terminal)."""
+    if driver_id is None:
+        return None
+    qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=_STARTED_STATES)
+    if exclude_order_id is not None:
+        qs = qs.exclude(order_id=exclude_order_id)
+    return qs.first()
+
+
+def meta_projected_start(meta, now):
+    """Soonest this overlay order can realistically start: its planned time, or —
+    if the driver is on an *overrunning* trip — when that one finishes + buffer."""
+    base = meta.planned_datetime
+    if base is None:
+        return None
+    current = meta_active_trip(meta.driver_id, exclude_order_id=meta.order_id)
+    if current is None:
+        return base
+    current_end = current.planned_end
+    if current_end is not None and now > current_end:
+        return max(base, now + travel_buffer())
+    return base
+
+
+def meta_needs_reassign(meta, now):
+    """Overlay order is *at risk* when its projected start (given the driver's
+    current overrunning trip) blows past the latest acceptable start."""
+    if meta.latest_start is None:
+        return False
+    ps = meta_projected_start(meta, now)
+    return ps is not None and ps > meta.latest_start

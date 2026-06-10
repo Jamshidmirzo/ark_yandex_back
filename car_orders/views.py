@@ -71,6 +71,12 @@ def _bad_request(code, message):
     )
 
 
+def _clear_live_location(pk):
+    """Drop the stored live position once an order is done/cancelled/reassigned,
+    so a dead marker doesn't linger on the map or in «Мои заказы»."""
+    OrderLiveLocation.objects.filter(order_id=pk).delete()
+
+
 def _conflict_payload(order):
     return {
         "order_id": order.id,
@@ -332,49 +338,52 @@ class OverlayClaimView(APIView):
         car_id = request.data.get("car_id")
         car_label = request.data.get("car_label", "")
         terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-        meta = OrderMeta.objects.filter(order_id=pk).first()
-        # Already taken by a DIFFERENT driver and still active → reject.
-        if (
-            meta
-            and meta.overlay_claimed
-            and meta.trip_state not in terminal
-            and meta.driver_id is not None
-            and str(meta.driver_id) != str(driver_id)
-        ):
-            return _bad_request(
-                "ALREADY_CLAIMED", _("This order is already taken by another driver.")
-            )
-        # Window conflict check against the driver's other committed overlay orders.
-        if meta and meta.planned_datetime and meta.estimated_duration:
-            conflict = scheduling.meta_conflict(
-                driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
-            )
-            if conflict is not None:
-                return Response(
-                    {
-                        "ok": False,
-                        "conflict": {
-                            "order_id": conflict.order_id,
-                            "planned_start": conflict.planned_datetime,
-                            "planned_end": conflict.planned_end,
-                            "address": f"Заказ #{conflict.order_id}",
-                        },
-                    }
+        # Lock the row inside a transaction so two concurrent claims can't both
+        # pass the checks and double-book the order (check-then-act race).
+        with transaction.atomic():
+            meta = OrderMeta.objects.select_for_update().filter(order_id=pk).first()
+            # Already taken by a DIFFERENT driver and still active → reject.
+            if (
+                meta
+                and meta.overlay_claimed
+                and meta.trip_state not in terminal
+                and meta.driver_id is not None
+                and str(meta.driver_id) != str(driver_id)
+            ):
+                return _bad_request(
+                    "ALREADY_CLAIMED", _("This order is already taken by another driver.")
                 )
-        # Don't rewind an in-progress trip on a double-tap; only (re)start from a
-        # fresh/terminal state.
-        meta, _created = OrderMeta.objects.update_or_create(
-            order_id=pk,
-            defaults={
-                "driver_id": driver_id,
-                "car_id": car_id,
-                "car_label": car_label,
-                "overlay_claimed": True,
-            },
-        )
-        if _created or meta.trip_state in terminal:
-            meta.trip_state = OrderMeta.TripState.ASSIGNED
-            meta.save(update_fields=["trip_state"])
+            # Window conflict check against the driver's other committed overlay orders.
+            if meta and meta.planned_datetime and meta.estimated_duration:
+                conflict = scheduling.meta_conflict(
+                    driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+                )
+                if conflict is not None:
+                    return Response(
+                        {
+                            "ok": False,
+                            "conflict": {
+                                "order_id": conflict.order_id,
+                                "planned_start": conflict.planned_datetime,
+                                "planned_end": conflict.planned_end,
+                                "address": f"Заказ #{conflict.order_id}",
+                            },
+                        }
+                    )
+            # Don't rewind an in-progress trip on a double-tap; only (re)start from a
+            # fresh/terminal state.
+            meta, _created = OrderMeta.objects.update_or_create(
+                order_id=pk,
+                defaults={
+                    "driver_id": driver_id,
+                    "car_id": car_id,
+                    "car_label": car_label,
+                    "overlay_claimed": True,
+                },
+            )
+            if _created or meta.trip_state in terminal:
+                meta.trip_state = OrderMeta.TripState.ASSIGNED
+                meta.save(update_fields=["trip_state"])
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -401,6 +410,8 @@ class TripStateView(APIView):
         meta, _created = OrderMeta.objects.update_or_create(
             order_id=pk, defaults={"trip_state": state}
         )
+        if state in (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED):
+            _clear_live_location(pk)
         layer = get_channel_layer()
         if layer is not None:
             from car_orders.ws import group_name
@@ -431,6 +442,7 @@ class OverlayReleaseView(APIView):
         meta.car_label = ""
         meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.save()
+        _clear_live_location(pk)
         layer = get_channel_layer()
         if layer is not None:
             from car_orders.ws import group_name
@@ -505,6 +517,7 @@ class ReassignView(APIView):
         meta.car_label = ""
         meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.save()
+        _clear_live_location(pk)
         layer = get_channel_layer()
         if layer is not None:
             from car_orders.ws import group_name

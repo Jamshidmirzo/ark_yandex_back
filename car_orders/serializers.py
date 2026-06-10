@@ -316,6 +316,11 @@ class OrderMetaSerializer(serializers.ModelSerializer):
     """Local feature overlay for a (demo) order — coords, window, trip state."""
 
     planned_end = serializers.DateTimeField(read_only=True)
+    # Scheduling risk (computed): `at_risk` — projected start blows past the
+    # latest acceptable start (driver won't make it); `is_late` — accepted but not
+    # departed and the planned pickup time has already passed.
+    at_risk = serializers.SerializerMethodField()
+    is_late = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderMeta
@@ -335,8 +340,24 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "latest_start",
             "trip_state",
             "planned_end",
+            "at_risk",
+            "is_late",
         ]
-        read_only_fields = ["order_id", "planned_end"]
+        read_only_fields = ["order_id", "planned_end", "at_risk", "is_late"]
+
+    def get_at_risk(self, obj) -> bool:
+        from django.utils import timezone
+
+        from car_orders import scheduling
+
+        return scheduling.meta_needs_reassign(obj, timezone.now())
+
+    def get_is_late(self, obj) -> bool:
+        from django.utils import timezone
+
+        if obj.trip_state == OrderMeta.TripState.ASSIGNED and obj.planned_datetime:
+            return timezone.now() > obj.planned_datetime
+        return False
 
 
 class CarOrderActivitySerializer(serializers.ModelSerializer):
