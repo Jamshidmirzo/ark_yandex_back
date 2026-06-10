@@ -29,9 +29,7 @@ from core.views import health
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/", health, name="health"),
-    # New feature endpoints served LOCALLY (added here, data from demo elsewhere).
-    # Must come BEFORE the gateway catch-all. login/drivers/garage/car-orders
-    # stay proxied to the real backend.
+    path("healthcheck/", health, name="healthcheck"),
     path("api/v1/car-orders/estimate/", EstimateView.as_view(), name="car-order-estimate"),
     path(
         "api/v1/car-orders/drivers/me/overlay-orders/",

@@ -61,6 +61,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    # Normalise the mobile app's /<lang>/api/v1/... scheme to /api/v1/... so it
+    # resolves like the web frontend (must run before URL resolution).
+    "config.middleware.MobileLanguagePrefixMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",

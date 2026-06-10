@@ -37,10 +37,20 @@ what to proxy to the big `demo` backend:
 | Env | HTTP base URL | WebSocket base |
 |---|---|---|
 | Dev (local) | `http://127.0.0.1:8000/api/v1` | `ws://127.0.0.1:8000` |
+| Dev (LAN) | `http://<host-IP>:8000/api/v1` | `ws://<host-IP>:8000` |
 | Prod | `https://<your-host>/api/v1` | `wss://<your-host>` |
 
 > All paths in these docs are relative to the HTTP base URL, e.g.
 > `POST /car-orders/{id}/claim/` = `http://127.0.0.1:8000/api/v1/car-orders/12/claim/`.
+
+### Entering the host in the app (Base URL screen)
+- The app takes the **host without `/api/v1`** (e.g. `http://192.168.68.59:8000`), then builds paths
+  itself as `host/<lang>/api/v1/...` (language in the path — demo's native scheme).
+- On save it validates the URL with **`GET host/healthcheck/`** (no auth), expecting
+  **`200 {"status":"ok"}`**. The gateway answers this the same way demo does.
+- The gateway accepts **both** schemes: the web `/api/v1/...` (no language) and the mobile
+  `/<lang>/api/v1/...` — the language prefix is stripped on the way in, and `/ru/` is still added
+  upstream to demo. Same for the probe: `host/healthcheck/` and `host/ru/healthcheck/` both return `200`.
 
 ## Auth (short)
 
