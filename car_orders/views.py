@@ -267,6 +267,19 @@ class ClaimCheckView(APIView):
         )
 
 
+class MetaBatchView(APIView):
+    """Batch read of OrderMeta for a set of order ids, so the list can compute the
+    effective (overlay) status per row. Body: ``{order_ids: [...]}``."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        order_ids = request.data.get("order_ids") or []
+        metas = OrderMeta.objects.filter(order_id__in=order_ids)
+        return Response({"results": OrderMetaSerializer(metas, many=True).data})
+
+
 class ClaimCheckBatchView(APIView):
     """Batch window check: for a list of order ids, which ones fit the driver's
     schedule (so the list can show «можно взять» / «пересекается»).

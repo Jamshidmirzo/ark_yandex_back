@@ -13,6 +13,7 @@ from car_orders.views import (
     ClaimCheckView,
     EstimateView,
     LiveLocationView,
+    MetaBatchView,
     MyOverlayOrdersView,
     OrderMetaView,
     OverlayClaimView,
@@ -49,6 +50,11 @@ urlpatterns = [
         "api/v1/car-orders/claim-check-batch/",
         ClaimCheckBatchView.as_view(),
         name="car-order-claim-check-batch",
+    ),
+    path(
+        "api/v1/car-orders/meta-batch/",
+        MetaBatchView.as_view(),
+        name="car-order-meta-batch",
     ),
     path(
         "api/v1/car-orders/<int:pk>/overlay-claim/",
