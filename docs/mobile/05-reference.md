@@ -72,5 +72,6 @@ DRF limit/offset: `{ count, next, previous, results: [...] }`. Некоторы�
 | POST | `/car-orders/{id}/overlay-release/` | локально | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/trip-state/` `{trip_state}` | локально | [03](03-scheduling-overlay.md) |
 | GET·POST | `/car-orders/{id}/live-location/` | локально | [04](04-live-tracking.md) |
+| POST | `/car-orders/drivers/me/location/` `{driver_id,lat,lng}` | локально | [04](04-live-tracking.md) |
 | GET | `/car-orders/drivers/me/overlay-orders/?driver_id=X` | локально | [03](03-scheduling-overlay.md) |
 | WS | `/ws/car-orders/{id}/location/` | локально | [04](04-live-tracking.md) |

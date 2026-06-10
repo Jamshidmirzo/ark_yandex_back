@@ -442,6 +442,45 @@ class OverlayReleaseView(APIView):
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
+class DriverLocationView(APIView):
+    """The driver app posts its GPS ONCE here; the server attaches it to the
+    driver's currently-moving order(s) (to_client / in_trip) and fans it out over
+    WebSocket — so the mobile app doesn't need to know which order id to send to.
+    Body: ``{driver_id, lat, lng}`` → ``{updated_orders: [...]}``."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        driver_id = request.data.get("driver_id")
+        serializer = LocationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lat = serializer.validated_data["lat"]
+        lng = serializer.validated_data["lng"]
+        moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
+        metas = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=moving)
+        now = timezone.now()
+        layer = get_channel_layer()
+        updated = []
+        for meta in metas:
+            OrderLiveLocation.objects.update_or_create(
+                order_id=meta.order_id,
+                defaults={"lat": lat, "lng": lng, "last_seen": now},
+            )
+            updated.append(meta.order_id)
+            if layer is not None:
+                from car_orders.ws import group_name
+
+                async_to_sync(layer.group_send)(
+                    group_name(meta.order_id),
+                    {
+                        "type": "location.update",
+                        "data": {"lat": lat, "lng": lng, "last_seen": now.isoformat()},
+                    },
+                )
+        return Response({"updated_orders": updated})
+
+
 class MyOverlayOrdersView(APIView):
     """A driver's active orders from our overlay (both demo-claimed and
     overlay-claimed have driver_id on OrderMeta). Powers the «Мои заказы» page.

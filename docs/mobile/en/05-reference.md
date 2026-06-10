@@ -72,5 +72,6 @@ One error parser in the app: `error.message` → else `detail` → else first `{
 | POST | `/car-orders/{id}/overlay-release/` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/trip-state/` `{trip_state}` | local | [03](03-scheduling-overlay.md) |
 | GET·POST | `/car-orders/{id}/live-location/` | local | [04](04-live-tracking.md) |
+| POST | `/car-orders/drivers/me/location/` `{driver_id,lat,lng}` | local | [04](04-live-tracking.md) |
 | GET | `/car-orders/drivers/me/overlay-orders/?driver_id=X` | local | [03](03-scheduling-overlay.md) |
 | WS | `/ws/car-orders/{id}/location/` | local | [04](04-live-tracking.md) |

@@ -11,6 +11,7 @@ from django.urls import include, path, re_path
 from car_orders.views import (
     ClaimCheckBatchView,
     ClaimCheckView,
+    DriverLocationView,
     EstimateView,
     LiveLocationView,
     MetaBatchView,
@@ -34,6 +35,11 @@ urlpatterns = [
         "api/v1/car-orders/drivers/me/overlay-orders/",
         MyOverlayOrdersView.as_view(),
         name="car-order-my-overlay-orders",
+    ),
+    path(
+        "api/v1/car-orders/drivers/me/location/",
+        DriverLocationView.as_view(),
+        name="car-order-driver-location",
     ),
     path(
         "api/v1/car-orders/<int:pk>/live-location/",

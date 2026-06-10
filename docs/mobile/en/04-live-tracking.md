@@ -63,14 +63,24 @@ ch.stream.listen((raw) {
 ```
 Poll every 3 s if you don’t use the WebSocket.
 
-### Send position (driver app)
+### Send position (driver app) — RECOMMENDED
+`POST /car-orders/drivers/me/location/`
+```json
+{ "driver_id": 671, "lat": 41.331, "lng": 69.255 }
+```
+- The **driver** app posts its GPS here every ~10 s — **one endpoint, no need to know the order id**.
+- The server finds the driver's **current active order** (stage `to_client`/`in_trip`) and attaches the
+  position to it, then fans it out over WebSocket.
+- Response: `{ "updated_orders": [88] }` — which orders it applied to (usually one). If the driver
+  isn't driving anything right now, you get `{ "updated_orders": [] }`.
+
+### Send position to a specific order (alternative)
 `POST /car-orders/{id}/live-location/`
 ```json
 { "lat": 41.331, "lng": 69.255 }
 ```
-- The **driver** app posts its GPS here (e.g. every 10 s while the order is active).
-- This POST **fans the position out** to every connected WebSocket — nothing else to send.
-- You may attach the route once: add `"geometry": [[lng,lat], ...]` (optional).
+- Same thing but explicitly by order id (used by the simulator). Also fans out over WebSocket.
+- You may attach the route once: `"geometry": [[lng,lat], ...]` (optional).
 
 > `geometry` in responses/route is `[lng, lat]`. Flip to `[lat, lng]` for rendering.
 
