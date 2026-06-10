@@ -146,6 +146,10 @@ the **button** column shows the literal Russian button label the driver taps.
 - Geofence (**hard gate**): the “I’m here” and “Arrived” buttons appear **only** when the driver is
   within the zone (~400 m) of the pickup/destination — so arrival can't be marked from afar. While
   far, the distance to the point is shown instead of the button.
+- Planned time (**soft, not a block**): the driver may start before `planned_datetime`. Starting much
+  earlier (more than **30 min** before the pickup) shows an “you're leaving early” notice; and once at
+  the pickup **before** the planned time, it shows “wait ≈ N min” (until `planned_datetime`). Claiming
+  and proceeding are still allowed — it's only a notice.
 
 ---
 
