@@ -143,8 +143,9 @@ the **button** column shows the literal Russian button label the driver taps.
 | `cancelled` | Отменён (cancelled) | Отменён (cancelled) | red | — (set by `overlay-release`) |
 
 - `400 INVALID_STATUS` — you can’t change the stage of an already **completed** order.
-- Geofence (optional): light up the “I’m here” / “Arrived” buttons by distance (~400 m) to the
-  pickup/destination — as a hint, not a hard block.
+- Geofence (**hard gate**): the “I’m here” and “Arrived” buttons appear **only** when the driver is
+  within the zone (~400 m) of the pickup/destination — so arrival can't be marked from afar. While
+  far, the distance to the point is shown instead of the button.
 
 ---
 
