@@ -206,6 +206,24 @@ def test_cannot_start_second_trip_while_one_is_active():
 
 
 @pytest.mark.django_db
+def test_fleet_live_lists_active_orders_with_positions():
+    """The dispatcher snapshot has every active order + its live position, and
+    excludes terminal ones."""
+    now = timezone.now()
+    OrderMeta.objects.create(
+        order_id=800, driver_id=1, overlay_claimed=True,
+        trip_state=OrderMeta.TripState.IN_TRIP, planned_datetime=now, estimated_duration=60,
+    )
+    OrderLiveLocation.objects.create(order_id=800, lat=41.3, lng=69.2, last_seen=now)
+    OrderMeta.objects.create(order_id=801, driver_id=1, trip_state=OrderMeta.TripState.COMPLETED)
+    data = APIClient().get("/api/v1/car-orders/fleet/live/").json()
+    ids = [o["order_id"] for o in data["orders"]]
+    assert 800 in ids and 801 not in ids
+    row = next(o for o in data["orders"] if o["order_id"] == 800)
+    assert row["lat"] == 41.3 and row["trip_state"] == "in_trip"
+
+
+@pytest.mark.django_db
 def test_can_start_gap_order_while_parked_at_a_shoot():
     """During a long shoot the driver is on hold (waiting/at_destination) — they
     CAN start a second «gap» order; only actively driving blocks a new trip."""

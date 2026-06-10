@@ -14,6 +14,7 @@ from car_orders.views import (
     DriverLocationView,
     EstimateView,
     ExtendView,
+    FleetLiveView,
     LiveLocationView,
     MetaBatchView,
     MyOverlayOrdersView,
@@ -31,6 +32,7 @@ urlpatterns = [
     path("health/", health, name="health"),
     path("healthcheck/", health, name="healthcheck"),
     path("api/v1/car-orders/estimate/", EstimateView.as_view(), name="car-order-estimate"),
+    path("api/v1/car-orders/fleet/live/", FleetLiveView.as_view(), name="car-order-fleet-live"),
     path(
         "api/v1/car-orders/drivers/me/overlay-orders/",
         MyOverlayOrdersView.as_view(),

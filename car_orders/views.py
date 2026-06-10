@@ -11,8 +11,6 @@ Permissions mirror ark-backend codenames (``car_order:*``, ``driver:*``,
 
 from datetime import timedelta
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
 from django.contrib.auth import get_user_model
 from django.db import models, transaction
 from django.utils import timezone
@@ -52,6 +50,7 @@ from car_orders.serializers import (
     ShiftStartSerializer,
     VehicleReportSerializer,
 )
+from car_orders.ws import broadcast_location
 from config.auth import DemoTokenAuthentication
 
 User = get_user_model()
@@ -166,6 +165,20 @@ class EstimateView(APIView):
         )
 
 
+class FleetLiveView(APIView):
+    """Dispatcher dashboard snapshot — every active order with its live position +
+    risk flags, for «Диспетчерская». Live updates come over the fleet WebSocket
+    (/ws/car-orders/fleet/)."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        from car_orders.fleet import fleet_live_orders
+
+        return Response({"orders": fleet_live_orders()})
+
+
 class LiveLocationView(APIView):
     """Live driver position for an order, served locally (gateway/hybrid setup).
     GET returns the latest position or null; POST upserts {lat, lng}. Stays
@@ -202,18 +215,11 @@ class LiveLocationView(APIView):
             defaults["geometry"] = geometry
         loc, _created = OrderLiveLocation.objects.update_or_create(order_id=pk, defaults=defaults)
 
-        # Push the new position to any connected trackers (real-time, no polling).
-        layer = get_channel_layer()
-        if layer is not None:
-            from car_orders.ws import group_name
-
-            data = {"lat": loc.lat, "lng": loc.lng, "last_seen": loc.last_seen.isoformat()}
-            if geometry is not None:  # carry the route on the first push
-                data["geometry"] = geometry
-            async_to_sync(layer.group_send)(
-                group_name(pk),
-                {"type": "location.update", "data": data},
-            )
+        # Push the new position to connected trackers + the fleet dashboard.
+        data = {"lat": loc.lat, "lng": loc.lng, "last_seen": loc.last_seen.isoformat()}
+        if geometry is not None:  # carry the route on the first push
+            data["geometry"] = geometry
+        broadcast_location(pk, data)
         return Response({"lat": loc.lat, "lng": loc.lng, "last_seen": loc.last_seen})
 
 
@@ -433,14 +439,7 @@ class TripStateView(APIView):
         )
         if state in (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED):
             _clear_live_location(pk)
-        layer = get_channel_layer()
-        if layer is not None:
-            from car_orders.ws import group_name
-
-            async_to_sync(layer.group_send)(
-                group_name(pk),
-                {"type": "location.update", "data": {"trip_state": state}},
-            )
+        broadcast_location(pk, {"trip_state": state})
         return Response(OrderMetaSerializer(meta).data)
 
 
@@ -464,14 +463,7 @@ class OverlayReleaseView(APIView):
         meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.save()
         _clear_live_location(pk)
-        layer = get_channel_layer()
-        if layer is not None:
-            from car_orders.ws import group_name
-
-            async_to_sync(layer.group_send)(
-                group_name(pk),
-                {"type": "location.update", "data": {"trip_state": "cancelled"}},
-            )
+        broadcast_location(pk, {"trip_state": "cancelled"})
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -539,14 +531,7 @@ class ReassignView(APIView):
         meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.save()
         _clear_live_location(pk)
-        layer = get_channel_layer()
-        if layer is not None:
-            from car_orders.ws import group_name
-
-            async_to_sync(layer.group_send)(
-                group_name(pk),
-                {"type": "location.update", "data": {"trip_state": "cancelled"}},
-            )
+        broadcast_location(pk, {"trip_state": "cancelled"})
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -568,7 +553,6 @@ class DriverLocationView(APIView):
         moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
         metas = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=moving)
         now = timezone.now()
-        layer = get_channel_layer()
         updated = []
         for meta in metas:
             OrderLiveLocation.objects.update_or_create(
@@ -576,16 +560,9 @@ class DriverLocationView(APIView):
                 defaults={"lat": lat, "lng": lng, "last_seen": now},
             )
             updated.append(meta.order_id)
-            if layer is not None:
-                from car_orders.ws import group_name
-
-                async_to_sync(layer.group_send)(
-                    group_name(meta.order_id),
-                    {
-                        "type": "location.update",
-                        "data": {"lat": lat, "lng": lng, "last_seen": now.isoformat()},
-                    },
-                )
+            broadcast_location(
+                meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()}
+            )
         return Response({"updated_orders": updated})
 
 
