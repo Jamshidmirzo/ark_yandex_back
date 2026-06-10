@@ -46,6 +46,13 @@ order) or `{"field":["..."]}` / `{"non_field_errors":["..."]}`.
 
 One error parser in the app: `error.message` → else `detail` → else first `{field:[msg]}` → else “Network error”.
 
+## Overlay endpoint auth
+Open in dev. With `REQUIRE_OVERLAY_AUTH=true` (env) they require the same **demo token**
+(`Authorization: Bearer <access>`): the gateway validates it via demo `/auth/me/` and takes the
+`driver_id` **from the token** (a body `driver_id` is ignored → no impersonation / cross-driver reads).
+No / invalid token → `401`. Exceptions: `estimate` (pure function) and `live-location` (simulator push)
+stay reachable; `reassign` is dispatcher-only (`car_order:approve`).
+
 ## HTTP codes
 `200` ok · `201` created · `400` validation/business rule · `401` token expired (→`refresh`) ·
 `403` forbidden · `404` not found · `409` time conflict · `502` gateway couldn’t reach demo.

@@ -167,6 +167,12 @@ UPSTREAM_API_BASE = env(
     default="http://host.docker.internal:12001/ru/api/v1",
 )
 
+# Overlay auth bridge. OFF (default) keeps the open dev behaviour; ON validates
+# the demo bearer token via demo /auth/me/ (config.auth.DemoTokenAuthentication)
+# and derives the driver from it instead of the request body. Flip on once login
+# is verified end-to-end. See car_orders.permissions.
+REQUIRE_OVERLAY_AUTH = env.bool("REQUIRE_OVERLAY_AUTH", default=False)
+
 
 # Car-order scheduling & routing.
 # Travel buffer reserved between two consecutive orders of one driver, so the

@@ -51,7 +51,13 @@ def gateway(request, path):
         )
     except requests.RequestException as exc:
         return JsonResponse(
-            {"error": {"code": "UPSTREAM_UNREACHABLE", "message": str(exc), "details": {"upstream": url}}},
+            {
+                "error": {
+                    "code": "UPSTREAM_UNREACHABLE",
+                    "message": str(exc),
+                    "details": {"upstream": url},
+                }
+            },
             status=502,
         )
 

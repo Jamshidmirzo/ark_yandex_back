@@ -35,6 +35,7 @@ from car_orders.models import (
     OrderMeta,
     VehicleReport,
 )
+from car_orders.permissions import OverlayAuthenticated, OverlayDispatcher, acting_driver_id
 from car_orders.serializers import (
     CarOrderActivitySerializer,
     CarOrderSerializer,
@@ -51,6 +52,7 @@ from car_orders.serializers import (
     ShiftStartSerializer,
     VehicleReportSerializer,
 )
+from config.auth import DemoTokenAuthentication
 
 User = get_user_model()
 
@@ -146,8 +148,8 @@ class EstimateView(APIView):
     (no upstream auth needed — it's a pure function of two coordinates). Mounted
     at /api/v1/car-orders/estimate/ BEFORE the gateway catch-all."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request):
         serializer = RouteEstimateSerializer(data=request.data)
@@ -166,9 +168,10 @@ class EstimateView(APIView):
 
 class LiveLocationView(APIView):
     """Live driver position for an order, served locally (gateway/hybrid setup).
-    GET returns the latest position or null; POST upserts {lat, lng}. AllowAny so
-    the simulator / driver app can push without the demo JWT for now. Mounted at
-    /api/v1/car-orders/<id>/live-location/ BEFORE the gateway catch-all."""
+    GET returns the latest position or null; POST upserts {lat, lng}. Stays
+    AllowAny — the auto-simulator pushes here without a demo JWT, and the data is
+    keyed by order id. Mounted at /api/v1/car-orders/<id>/live-location/ BEFORE
+    the gateway catch-all."""
 
     authentication_classes: list = []
     permission_classes = [AllowAny]
@@ -220,8 +223,8 @@ class OrderMetaView(APIView):
     AllowAny for now (the frontend sends the driver id). Mounted before the
     gateway catch-all."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def get(self, request, pk):
         meta = OrderMeta.objects.filter(order_id=pk).first()
@@ -246,11 +249,11 @@ class ClaimCheckView(APIView):
     Returns ``{ok, conflict}`` — so a driver CAN take a second order when it fits
     a free gap, instead of a blanket "you already have an order"."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        driver_id = request.data.get("driver_id")
+        driver_id = acting_driver_id(request, request.data.get("driver_id"))
         meta = OrderMeta.objects.filter(order_id=pk).first()
         # No saved window → nothing to schedule against; allow.
         if not meta or not meta.planned_datetime or not meta.estimated_duration:
@@ -277,8 +280,8 @@ class MetaBatchView(APIView):
     """Batch read of OrderMeta for a set of order ids, so the list can compute the
     effective (overlay) status per row. Body: ``{order_ids: [...]}``."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request):
         order_ids = request.data.get("order_ids") or []
@@ -291,11 +294,11 @@ class ClaimCheckBatchView(APIView):
     schedule (so the list can show «можно взять» / «пересекается»).
     Body: ``{driver_id, order_ids: [...]}`` → ``{results: [{order_id, ok, conflict}]}``."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request):
-        driver_id = request.data.get("driver_id")
+        driver_id = acting_driver_id(request, request.data.get("driver_id"))
         order_ids = request.data.get("order_ids") or []
         metas = {m.order_id: m for m in OrderMeta.objects.filter(order_id__in=order_ids)}
         results = []
@@ -330,11 +333,11 @@ class OverlayClaimView(APIView):
     first; on success records driver + car on the OrderMeta. demo stays the
     source of login/base data."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        driver_id = request.data.get("driver_id")
+        driver_id = acting_driver_id(request, request.data.get("driver_id"))
         car_id = request.data.get("car_id")
         car_label = request.data.get("car_label", "")
         terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
@@ -392,8 +395,8 @@ class TripStateView(APIView):
     at_destination / waiting / completed. Updates OrderMeta and pushes the change
     over the order's WebSocket so the client/dispatcher see it live."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
         state = request.data.get("trip_state")
@@ -444,8 +447,8 @@ class OverlayReleaseView(APIView):
     driver's schedule and the auto-simulator, and pushes a ``cancelled`` state
     over the WebSocket. Idempotent."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
         meta = OrderMeta.objects.filter(order_id=pk).first()
@@ -476,8 +479,8 @@ class ExtendView(APIView):
     applied; ``conflict`` is a warning the new end overlaps the driver's next order.
     Allowed for the driver or a dispatcher (the frontend gates the button)."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
         try:
@@ -519,8 +522,8 @@ class ReassignView(APIView):
     so another driver can pick it up. A plain demo claim is owned by demo and
     can't be reassigned from here (only overlay-claimed orders). Idempotent."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayDispatcher]
 
     def post(self, request, pk):
         meta = OrderMeta.objects.filter(order_id=pk).first()
@@ -550,11 +553,11 @@ class DriverLocationView(APIView):
     WebSocket — so the mobile app doesn't need to know which order id to send to.
     Body: ``{driver_id, lat, lng}`` → ``{updated_orders: [...]}``."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def post(self, request):
-        driver_id = request.data.get("driver_id")
+        driver_id = acting_driver_id(request, request.data.get("driver_id"))
         serializer = LocationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         lat = serializer.validated_data["lat"]
@@ -588,11 +591,13 @@ class MyOverlayOrdersView(APIView):
     overlay-claimed have driver_id on OrderMeta). Powers the «Мои заказы» page.
     ``?driver_id=X`` (the frontend passes the logged-in user id)."""
 
-    authentication_classes: list = []
-    permission_classes = [AllowAny]
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
 
     def get(self, request):
-        driver_id = request.query_params.get("driver_id")
+        # When auth is enforced, the driver is the token's user — so ?driver_id=
+        # can't enumerate another driver's orders (IDOR).
+        driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
         if not driver_id:
             return Response([])
         qs = (
