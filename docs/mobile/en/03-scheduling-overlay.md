@@ -120,16 +120,20 @@ call it after completion. Idempotent (if there’s no meta it just returns `{ "o
 `POST /car-orders/{id}/trip-state/` `{ "trip_state": "to_client" }` → updated `meta`.
 The change is **pushed in real time** over WebSocket (section 04).
 
-| trip_state | The client sees | Driver button → next |
-|---|---|---|
-| `assigned` | Driver assigned | “Heading to you” → `to_client` |
-| `to_client` | Driver on the way to you | “I’m here” → `at_client` |
-| `at_client` | Driver arrived, waiting | “Start trip” → `in_trip` |
-| `in_trip` | On the way | “Arrived” → `at_destination` |
-| `at_destination` | Arrived at destination | “On hold” → `waiting` |
-| `waiting` | Driver stepped away — on hold | “Continue” → `in_trip` |
-| `completed` | Order completed | — |
-| `cancelled` | Order dropped | — (set by `overlay-release`) |
+Labels are **perspective-aware**: the driver sees a first-person action, the client/observer a
+neutral status. Each phase has its own tag colour (neighbouring phases are distinct, the pause stands
+out). The UI strings are Russian (English gloss in parentheses below).
+
+| trip_state | Driver sees | Client sees | Tag color | Driver button → next |
+|---|---|---|---|---|
+| `assigned` | Принят (accepted) | Назначен водитель (driver assigned) | default | “Выехал к клиенту” → `to_client` |
+| `to_client` | Еду к клиенту (en route to pickup) | В пути к подаче | geekblue | “Я на месте” → `at_client` |
+| `at_client` | Жду клиента (waiting) | На подаче (at pickup) | cyan | “Начать поездку” → `in_trip` |
+| `in_trip` | Везу клиента (carrying) | В пути к месту (en route to dest.) | blue | “Прибыли на место” → `at_destination` |
+| `at_destination` | На месте (arrived) | Прибыл на место | lime | “На ожидание” → `waiting` |
+| `waiting` | На паузе (on hold) | Пауза — ожидание | orange | “Продолжить” → `in_trip` |
+| `completed` | Завершил | Завершён | green | — |
+| `cancelled` | Отменён | Отменён | red | — (set by `overlay-release`) |
 
 - `400 INVALID_STATUS` — you can’t change the stage of an already **completed** order.
 - Geofence (optional): light up the “I’m here” / “Arrived” buttons by distance (~400 m) to the
