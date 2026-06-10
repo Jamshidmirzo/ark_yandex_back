@@ -9,6 +9,7 @@ from django.contrib import admin
 from django.urls import include, path, re_path
 
 from car_orders.views import (
+    ClaimCheckBatchView,
     ClaimCheckView,
     EstimateView,
     LiveLocationView,
@@ -43,6 +44,11 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/claim-check/",
         ClaimCheckView.as_view(),
         name="car-order-claim-check",
+    ),
+    path(
+        "api/v1/car-orders/claim-check-batch/",
+        ClaimCheckBatchView.as_view(),
+        name="car-order-claim-check-batch",
     ),
     path(
         "api/v1/car-orders/<int:pk>/overlay-claim/",

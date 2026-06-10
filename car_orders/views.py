@@ -267,6 +267,43 @@ class ClaimCheckView(APIView):
         )
 
 
+class ClaimCheckBatchView(APIView):
+    """Batch window check: for a list of order ids, which ones fit the driver's
+    schedule (so the list can show «можно взять» / «пересекается»).
+    Body: ``{driver_id, order_ids: [...]}`` → ``{results: [{order_id, ok, conflict}]}``."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        driver_id = request.data.get("driver_id")
+        order_ids = request.data.get("order_ids") or []
+        metas = {m.order_id: m for m in OrderMeta.objects.filter(order_id__in=order_ids)}
+        results = []
+        for oid in order_ids:
+            meta = metas.get(oid)
+            if meta is None or not meta.planned_datetime or not meta.estimated_duration:
+                results.append({"order_id": oid, "ok": True, "conflict": None})
+                continue
+            conflict = scheduling.meta_conflict(
+                driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(oid)
+            )
+            results.append(
+                {
+                    "order_id": oid,
+                    "ok": conflict is None,
+                    "conflict": None
+                    if conflict is None
+                    else {
+                        "order_id": conflict.order_id,
+                        "planned_start": conflict.planned_datetime,
+                        "planned_end": conflict.planned_end,
+                    },
+                }
+            )
+        return Response({"results": results})
+
+
 class OverlayClaimView(APIView):
     """Claim an order in OUR layer (not demo), so a driver can take a second
     order with the SAME car sequentially — which the demo backend forbids
