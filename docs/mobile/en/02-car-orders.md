@@ -69,6 +69,10 @@ Response `200` — a **CarOrder**:
 `POST /car-orders/` (permission `car_order:create`)
 
 Required: `project_name`, `planned_datetime` (ISO-8601 UTC), `address`, `car_type_id`.
+
+> **`address`** — the text address of the **destination** (where the car is needed). Map
+> coordinates do NOT go here — they go to `meta` (`address_lat/lng` = destination, `origin_lat/lng`
+> = pickup, see [03](03-scheduling-overlay.md)).
 ```json
 {
   "project_name": "Turandot Residences",

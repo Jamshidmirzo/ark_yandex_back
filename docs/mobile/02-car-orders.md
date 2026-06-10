@@ -69,6 +69,10 @@ Query-параметры:
 `POST /car-orders/` (право `car_order:create`)
 
 Обязательные поля: `project_name`, `planned_datetime` (ISO-8601 UTC), `address`, `car_type_id`.
+
+> **`address`** — текстовый адрес **назначения** (куда нужна машина). Координаты точек на карте
+> сюда НЕ кладутся — они идут в `meta` (`address_lat/lng` = назначение, `origin_lat/lng` = подача,
+> см. [03](03-scheduling-overlay.md)).
 ```json
 {
   "project_name": "Turandot Residences",

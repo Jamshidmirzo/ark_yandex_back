@@ -31,6 +31,9 @@ demo stores the base order but can’t hold: the A→B route, duration/windows, 
   "planned_end": "2026-06-11T09:43:00Z"
 }
 ```
+- `origin_*` — the **pickup** point coordinates (from 🟢); `address_*` — the **destination** point
+  coordinates (to 🔴). The `address` prefix means destination. The pickup point has no separate text
+  address — only coordinates. The destination's text address is stored by demo in `address` (section 02).
 - `driver_id` — set on ANY accept (used for the window check).
 - `overlay_claimed` — `true` **only** if the order was claimed via our layer (`overlay-claim`),
   not demo. Use it to tell “managed by us” from a normal demo claim.
