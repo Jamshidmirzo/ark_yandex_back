@@ -350,7 +350,11 @@ class OrderMetaSerializer(serializers.ModelSerializer):
 
         from car_orders import scheduling
 
-        return scheduling.meta_needs_reassign(obj, timezone.now())
+        # `active_by_driver` (if provided in context) lets the fleet snapshot
+        # compute risk from one in-memory index instead of a query per order.
+        return scheduling.meta_needs_reassign(
+            obj, timezone.now(), active=self.context.get("active_by_driver")
+        )
 
     def get_is_late(self, obj) -> bool:
         from django.utils import timezone

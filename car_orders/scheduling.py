@@ -138,10 +138,18 @@ STARTED_STATES = (
 MOVING_STATES = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
 
 
-def meta_active_trip(driver_id, exclude_order_id=None, states=STARTED_STATES):
+def meta_active_trip(driver_id, exclude_order_id=None, states=STARTED_STATES, active=None):
     """The driver's order in one of ``states`` (default: any started/non-terminal
-    stage). Pass ``MOVING_STATES`` to ask only «is the driver actively driving»."""
+    stage). Pass ``MOVING_STATES`` to ask only «is the driver actively driving».
+
+    ``active`` (optional) is a precomputed ``{driver_id: [OrderMeta]}`` index of
+    started trips — pass it to avoid a per-order DB query when scanning a fleet."""
     if driver_id is None:
+        return None
+    if active is not None:
+        for m in active.get(driver_id, ()):  # in-memory, no query
+            if m.trip_state in states and m.order_id != exclude_order_id:
+                return m
         return None
     qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=states)
     if exclude_order_id is not None:
@@ -149,13 +157,13 @@ def meta_active_trip(driver_id, exclude_order_id=None, states=STARTED_STATES):
     return qs.first()
 
 
-def meta_projected_start(meta, now):
+def meta_projected_start(meta, now, active=None):
     """Soonest this overlay order can realistically start: its planned time, or —
     if the driver is on an *overrunning* trip — when that one finishes + buffer."""
     base = meta.planned_datetime
     if base is None:
         return None
-    current = meta_active_trip(meta.driver_id, exclude_order_id=meta.order_id)
+    current = meta_active_trip(meta.driver_id, exclude_order_id=meta.order_id, active=active)
     if current is None:
         return base
     current_end = current.planned_end
@@ -164,10 +172,10 @@ def meta_projected_start(meta, now):
     return base
 
 
-def meta_needs_reassign(meta, now):
+def meta_needs_reassign(meta, now, active=None):
     """Overlay order is *at risk* when its projected start (given the driver's
     current overrunning trip) blows past the latest acceptable start."""
     if meta.latest_start is None:
         return False
-    ps = meta_projected_start(meta, now)
+    ps = meta_projected_start(meta, now, active=active)
     return ps is not None and ps > meta.latest_start
