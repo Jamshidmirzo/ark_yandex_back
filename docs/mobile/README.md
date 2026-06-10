@@ -26,7 +26,8 @@
                                │   drivers/*, garage/*   ──proxy──▶  demo backend
                                └─ ФИЧИ (локально): estimate, meta, claim-check,
                                    overlay-claim, overlay-release, trip-state,
-                                   live-location, overlay-orders («Мои заказы»), WebSocket
+                                   extend, reassign, live-location,
+                                   overlay-orders («Мои заказы»), WebSocket
 ```
 
 - **Логин и базовые данные** (аккаунты, заявки, водители, машины) приходят с `demo`.
@@ -74,7 +75,7 @@
 2. `GET /car-orders/?status=awaiting_driver` → доступные заявки.
 3. `GET /car-orders/{id}/` → деталь.
 4. **Принять:**
-   - машина свободна → `POST /car-orders/{id}/claim/` `{car_id}` (demo) + `POST /meta/ {driver_id}`;
+   - машина свободна → `POST /car-orders/{id}/claim/` `{car_id}` (demo) + `POST /car-orders/{id}/meta/ {driver_id}`;
    - своя занятая машина (второй заказ той же машиной) → `POST /car-orders/{id}/overlay-claim/`
      `{driver_id, car_id, car_label}`. Перед приёмом проверь окно: `POST /claim-check/ {driver_id}`.
 5. **Этапы** (каждый — пуш по WS): `POST /trip-state/` `{trip_state}`:

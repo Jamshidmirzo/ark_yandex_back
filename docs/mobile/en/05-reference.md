@@ -39,6 +39,7 @@ normalise: “if there’s `results` use it, else the array itself”.
 | `TIME_CONFLICT` | 200/409 | window overlap (in `claim-check`/`overlay-claim` — the `conflict` field) |
 | `ALREADY_CLAIMED` | 400 | `overlay-claim` of someone else’s active order |
 | `INVALID_STATUS` | 400 | changing `trip_state` of a completed order |
+| `NOT_FOUND` | 400 | no meta/window (e.g. `reassign`/`extend` without an overlay) |
 
 **demo (DRF):** `{"detail":"..."}` (e.g. `"This car is not available."` — car busy on an active
 order) or `{"field":["..."]}` / `{"non_field_errors":["..."]}`.
@@ -68,10 +69,16 @@ One error parser in the app: `error.message` → else `detail` → else first `{
 | POST | `/car-orders/estimate/` | local | [03](03-scheduling-overlay.md) |
 | GET·POST | `/car-orders/{id}/meta/` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/claim-check/` `{driver_id}` | local | [03](03-scheduling-overlay.md) |
+| POST | `/car-orders/claim-check-batch/` `{driver_id,order_ids}` · `/meta-batch/` `{order_ids}` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/overlay-claim/` `{driver_id,car_id,car_label}` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/overlay-release/` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/trip-state/` `{trip_state}` | local | [03](03-scheduling-overlay.md) |
+| POST | `/car-orders/{id}/extend/` `{minutes}` · `/reassign/` | local | [03](03-scheduling-overlay.md) §3.9 |
 | GET·POST | `/car-orders/{id}/live-location/` | local | [04](04-live-tracking.md) |
 | POST | `/car-orders/drivers/me/location/` `{driver_id,lat,lng}` | local | [04](04-live-tracking.md) |
 | GET | `/car-orders/drivers/me/overlay-orders/?driver_id=X` | local | [03](03-scheduling-overlay.md) |
+| GET | `/health/` · `/healthcheck/` (server-reachability probe for mobile) | local | [README](README.md) |
 | WS | `/ws/car-orders/{id}/location/` | local | [04](04-live-tracking.md) |
+
+> Mobile scheme: the app calls `host/<lang>/api/v1/...` (language in the path) — the gateway strips the
+> prefix and routes it like `/api/v1/...`. URL probe — `host/healthcheck/` → `200 {"status":"ok"}`. See [README](README.md).

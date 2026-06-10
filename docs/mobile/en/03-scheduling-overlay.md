@@ -78,6 +78,12 @@ Computes the order’s window `[planned_datetime, planned_end]` and checks it ag
 **other active** orders (+ a travel buffer). Completed/cancelled windows don’t count. Call it
 **before** claiming: `ok:false` → show the conflict, block the claim.
 
+**Batch (for the list screen)** — so you don't call them one by one:
+- `POST /car-orders/claim-check-batch/` `{ "driver_id":671, "order_ids":[88,90] }` →
+  `{ "results":[ { "order_id":88, "ok":true, "conflict":null }, ... ] }` — does each fit the window.
+- `POST /car-orders/meta-batch/` `{ "order_ids":[88,90] }` → `{ "results":[ OrderMeta, ... ] }` —
+  the overlay for all at once (effective status per list row).
+
 ---
 
 ## 3.4 Claiming — two paths
@@ -122,18 +128,19 @@ The change is **pushed in real time** over WebSocket (section 04).
 
 Labels are **perspective-aware**: the driver sees a first-person action, the client/observer a
 neutral status. Each phase has its own tag colour (neighbouring phases are distinct, the pause stands
-out). The UI strings are Russian (English gloss in parentheses below).
+out). UI strings are Russian; the **Driver/Client sees** columns add an English gloss in parentheses,
+the **button** column shows the literal Russian button label the driver taps.
 
 | trip_state | Driver sees | Client sees | Tag color | Driver button → next |
 |---|---|---|---|---|
 | `assigned` | Принят (accepted) | Назначен водитель (driver assigned) | default | “Выехал к клиенту” → `to_client` |
-| `to_client` | Еду к клиенту (en route to pickup) | В пути к подаче | geekblue | “Я на месте” → `at_client` |
-| `at_client` | Жду клиента (waiting) | На подаче (at pickup) | cyan | “Начать поездку” → `in_trip` |
+| `to_client` | Еду к клиенту (en route to pickup) | В пути к подаче (en route to pickup) | geekblue | “Я на месте” → `at_client` |
+| `at_client` | Жду клиента (waiting for client) | На подаче (at pickup) | cyan | “Начать поездку” → `in_trip` |
 | `in_trip` | Везу клиента (carrying) | В пути к месту (en route to dest.) | blue | “Прибыли на место” → `at_destination` |
-| `at_destination` | На месте (arrived) | Прибыл на место | lime | “На ожидание” → `waiting` |
-| `waiting` | На паузе (on hold) | Пауза — ожидание | orange | “Продолжить” → `in_trip` |
-| `completed` | Завершил | Завершён | green | — |
-| `cancelled` | Отменён | Отменён | red | — (set by `overlay-release`) |
+| `at_destination` | На месте (arrived) | Прибыл на место (arrived) | lime | “На ожидание” → `waiting` |
+| `waiting` | На паузе (on hold) | Пауза — ожидание (on hold) | orange | “Продолжить” → `in_trip` |
+| `completed` | Завершил (completed) | Завершён (completed) | green | — |
+| `cancelled` | Отменён (cancelled) | Отменён (cancelled) | red | — (set by `overlay-release`) |
 
 - `400 INVALID_STATUS` — you can’t change the stage of an already **completed** order.
 - Geofence (optional): light up the “I’m here” / “Arrived” buttons by distance (~400 m) to the

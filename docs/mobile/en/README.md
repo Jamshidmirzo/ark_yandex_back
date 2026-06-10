@@ -24,7 +24,8 @@ what to proxy to the big `demo` backend:
                                │   drivers/*, garage/*   ──proxy──▶  demo backend
                                └─ FEATURES (local): estimate, meta, claim-check,
                                    overlay-claim, overlay-release, trip-state,
-                                   live-location, overlay-orders («My orders»), WebSocket
+                                   extend, reassign, live-location,
+                                   overlay-orders («My orders»), WebSocket
 ```
 
 - **Login and base data** (accounts, orders, drivers, cars) come from `demo`.
