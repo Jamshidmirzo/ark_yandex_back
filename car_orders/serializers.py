@@ -359,7 +359,14 @@ class OrderMetaSerializer(serializers.ModelSerializer):
     def get_is_late(self, obj) -> bool:
         from django.utils import timezone
 
-        if obj.trip_state == OrderMeta.TripState.ASSIGNED and obj.planned_datetime:
+        # «Опаздывает» = a driver ACCEPTED it (driver_id set) but hasn't departed
+        # past the planned pickup. A freshly-created, not-yet-claimed order also
+        # defaults to trip_state=assigned — it must NOT read as late.
+        if (
+            obj.driver_id is not None
+            and obj.trip_state == OrderMeta.TripState.ASSIGNED
+            and obj.planned_datetime
+        ):
             return timezone.now() > obj.planned_datetime
         return False
 
