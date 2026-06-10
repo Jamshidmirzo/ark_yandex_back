@@ -410,16 +410,19 @@ class TripStateView(APIView):
             and state != OrderMeta.TripState.COMPLETED
         ):
             return _bad_request("INVALID_STATUS", _("This order is already completed."))
-        # One active trip per driver: don't let a driver START this order while
-        # another is still being driven (a driver is in one car / one place). Only
-        # checked on the transition INTO a started stage from a non-started one.
+        # Don't let a driver start DRIVING a 2nd order while already driving one
+        # (one car / one place). A parked driver — on hold during a long shoot
+        # (waiting / at_destination) — is free to take a gap order, so we only
+        # block the transition INTO a moving stage while another is moving.
         if (
             existing
             and existing.driver_id is not None
-            and state in scheduling.STARTED_STATES
-            and existing.trip_state not in scheduling.STARTED_STATES
+            and state in scheduling.MOVING_STATES
+            and existing.trip_state not in scheduling.MOVING_STATES
         ):
-            other = scheduling.meta_active_trip(existing.driver_id, exclude_order_id=int(pk))
+            other = scheduling.meta_active_trip(
+                existing.driver_id, exclude_order_id=int(pk), states=scheduling.MOVING_STATES
+            )
             if other is not None:
                 return _bad_request(
                     "ACTIVE_TRIP_EXISTS",

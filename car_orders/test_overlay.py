@@ -206,6 +206,23 @@ def test_cannot_start_second_trip_while_one_is_active():
 
 
 @pytest.mark.django_db
+def test_can_start_gap_order_while_parked_at_a_shoot():
+    """During a long shoot the driver is on hold (waiting/at_destination) — they
+    CAN start a second «gap» order; only actively driving blocks a new trip."""
+    client = APIClient()
+    OrderMeta.objects.create(
+        order_id=650, driver_id=20, overlay_claimed=True, trip_state=OrderMeta.TripState.WAITING
+    )
+    OrderMeta.objects.create(
+        order_id=651, driver_id=20, overlay_claimed=True, trip_state=OrderMeta.TripState.ASSIGNED
+    )
+    r = client.post(
+        "/api/v1/car-orders/651/trip-state/", {"trip_state": "to_client"}, format="json"
+    )
+    assert r.status_code == 200, r.content
+
+
+@pytest.mark.django_db
 def test_order_watchdog_release_frees_late_unstarted_but_not_active():
     now = timezone.now()
     OrderMeta.objects.create(  # late, accepted, not started → should be released

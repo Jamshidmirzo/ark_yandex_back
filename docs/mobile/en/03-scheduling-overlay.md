@@ -150,6 +150,14 @@ the **button** column shows the literal Russian button label the driver taps.
   earlier (more than **30 min** before the pickup) shows an “you're leaving early” notice; and once at
   the pickup **before** the planned time, it shows “wait ≈ N min” (until `planned_datetime`). Claiming
   and proceeding are still allowed — it's only a notice.
+- One trip at a time (`400 ACTIVE_TRIP_EXISTS`): you can't start **driving** a 2nd order while already
+  driving one (`to_client`/`in_trip`). But a **parked** driver (`waiting` / `at_destination` — e.g. on
+  hold during a long shoot) **can take a gap order** — that's the whole point.
+
+> **Long shoot → keep the driver busy.** Model it as **two orders**: “take to the shoot” (completes)
+> and “pick up” later. The middle is free by construction, so a gap order passes the window check. If
+> it's one long order with a wait, the driver can still start a second while `waiting` (the guard won't
+> block), but the long order's window keeps occupying time — so the two-order model is preferred.
 
 ---
 

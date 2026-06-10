@@ -133,13 +133,17 @@ STARTED_STATES = (
     OrderMeta.TripState.AT_DESTINATION,
     OrderMeta.TripState.WAITING,
 )
+# The driver is physically DRIVING (no spare capacity). A parked/waiting driver
+# (e.g. on hold during a long shoot) is NOT here — they can take a gap order.
+MOVING_STATES = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
 
 
-def meta_active_trip(driver_id, exclude_order_id=None):
-    """The driver's currently-executing overlay order (started, not terminal)."""
+def meta_active_trip(driver_id, exclude_order_id=None, states=STARTED_STATES):
+    """The driver's order in one of ``states`` (default: any started/non-terminal
+    stage). Pass ``MOVING_STATES`` to ask only «is the driver actively driving»."""
     if driver_id is None:
         return None
-    qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=STARTED_STATES)
+    qs = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=states)
     if exclude_order_id is not None:
         qs = qs.exclude(order_id=exclude_order_id)
     return qs.first()
