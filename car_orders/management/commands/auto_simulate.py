@@ -69,12 +69,18 @@ class Command(BaseCommand):
         parser.add_argument("--steps", type=int, default=90, help="Route resolution (points).")
         parser.add_argument("--poll", type=float, default=3.0, help="Re-scan for orders every N s.")
         parser.add_argument("--base", default="http://127.0.0.1:8000", help="Running server URL.")
+        parser.add_argument(
+            "--loop",
+            action="store_true",
+            help="Demo: re-drive a leg from the start when it finishes (continuous motion).",
+        )
 
     def handle(self, *args, **opts):
         base = opts["base"].rstrip("/")
         interval = opts["interval"]
         steps = max(2, opts["steps"])
         poll = opts["poll"]
+        loop = opts["loop"]
 
         seg_route: dict[int, list] = {}    # oid -> resampled [lng,lat] path of the current leg
         seg_progress: dict[int, int] = {}  # oid -> index along that path
@@ -175,9 +181,14 @@ class Command(BaseCommand):
                     continue
 
                 path = seg_route.get(oid)
+                if not path:
+                    continue
                 idx = seg_progress.get(oid, 0)
-                if not path or idx >= len(path):
-                    continue  # arrived → stays put until the driver advances the stage
+                if idx >= len(path):
+                    if loop:
+                        idx = 0  # demo: re-drive the same leg for continuous motion
+                    else:
+                        continue  # arrived → stays put until the driver advances the stage
                 lng, lat = path[idx]
                 post(oid, {"lat": lat, "lng": lng})
                 driver_pos[drv] = [lng, lat]
