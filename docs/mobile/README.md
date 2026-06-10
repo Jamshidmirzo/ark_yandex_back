@@ -23,7 +23,8 @@
                                │   submit/approve/reject/claim/complete),
                                │   drivers/*, garage/*   ──proxy──▶  demo backend
                                └─ ФИЧИ (локально): estimate, meta, claim-check,
-                                   overlay-claim, trip-state, live-location, WebSocket
+                                   overlay-claim, overlay-release, trip-state,
+                                   live-location, overlay-orders («Мои заказы»), WebSocket
 ```
 
 - **Логин и базовые данные** (аккаунты, заявки, водители, машины) приходят с `demo`.
@@ -57,10 +58,21 @@
 
 ## Минимальный сценарий «водитель»
 
-1. `POST /auth/login/` → токен.
-2. `GET /car-orders/?status=awaiting_driver` → список доступных заявок.
-3. `GET /car-orders/{id}/` → деталь (+ список свободных машин `available_vehicles`).
-4. `POST /car-orders/{id}/claim/` `{car_id}` → принять заказ.
-5. `POST /car-orders/{id}/trip-state/` `{trip_state: "to_client"}` → этап «выехал».
-6. Подключиться к `ws://.../ws/car-orders/{id}/location/` → видеть себя/смотреть позицию на карте.
-7. `POST /car-orders/{id}/complete/` → завершить.
+1. `POST /auth/login/` → токен (+ `user.id` = твой `driver_id`).
+2. `GET /car-orders/?status=awaiting_driver` → доступные заявки.
+3. `GET /car-orders/{id}/` → деталь.
+4. **Принять:**
+   - машина свободна → `POST /car-orders/{id}/claim/` `{car_id}` (demo) + `POST /meta/ {driver_id}`;
+   - своя занятая машина (второй заказ той же машиной) → `POST /car-orders/{id}/overlay-claim/`
+     `{driver_id, car_id, car_label}`. Перед приёмом проверь окно: `POST /claim-check/ {driver_id}`.
+5. **Этапы** (каждый — пуш по WS): `POST /trip-state/` `{trip_state}`:
+   `to_client → at_client → in_trip → at_destination → waiting`.
+6. Подключиться к `ws://.../ws/car-orders/{id}/location/` → позиция водителя + маршрут в реальном времени.
+7. **Завершить:** demo-заказ → `POST /complete/` + `POST /trip-state/ {completed}`; overlay-заказ → только
+   `POST /trip-state/ {completed}`.
+8. **Снять/вернуть в очередь** (на reject/отмене): `POST /car-orders/{id}/overlay-release/`.
+
+**Экран «Мои заказы»:** `GET /car-orders/drivers/me/overlay-orders/?driver_id=<id>` → все активные
+заказы водителя с этапом.
+
+Полный список путей — в [05-reference.md](05-reference.md). Детали оверлея — [03](03-scheduling-overlay.md).
