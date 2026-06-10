@@ -183,6 +183,15 @@ CORS_ALLOWED_ORIGINS = env(
     default=["http://localhost:5173", "http://127.0.0.1:5173"],
 )
 CORS_ALLOW_CREDENTIALS = True
+# Dev only: let a teammate on the same LAN (private 192.168.x / 10.x / 172.16-31.x
+# subnets) hit the API from their browser. Origins are reflected (not "*"), so
+# credentials keep working. Direct curl/Postman calls don't need this.
+if DEBUG:
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r"^http://192\.168\.\d{1,3}\.\d{1,3}(:\d+)?$",
+        r"^http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$",
+        r"^http://172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(:\d+)?$",
+    ]
 
 
 # Simple JWT — same token shape/lifetimes as ark-backend's auth_core.
