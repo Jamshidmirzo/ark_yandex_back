@@ -13,12 +13,14 @@ from car_orders.views import (
     ClaimCheckView,
     DriverLocationView,
     EstimateView,
+    ExtendView,
     LiveLocationView,
     MetaBatchView,
     MyOverlayOrdersView,
     OrderMetaView,
     OverlayClaimView,
     OverlayReleaseView,
+    ReassignView,
     TripStateView,
 )
 from config.gateway import gateway
@@ -76,6 +78,12 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/trip-state/",
         TripStateView.as_view(),
         name="car-order-trip-state",
+    ),
+    path("api/v1/car-orders/<int:pk>/extend/", ExtendView.as_view(), name="car-order-extend"),
+    path(
+        "api/v1/car-orders/<int:pk>/reassign/",
+        ReassignView.as_view(),
+        name="car-order-reassign",
     ),
     # Transparent gateway → real DEV backend (demo.ark.glob.uz). Keep last.
     re_path(r"^api/v1/(?P<path>.*)$", gateway, name="gateway"),

@@ -442,6 +442,80 @@ class OverlayReleaseView(APIView):
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
+class ExtendView(APIView):
+    """Add minutes to an order's planned duration in OUR overlay (demo doesn't
+    store the window). Pushes ``planned_end`` out and re-checks the driver's next
+    window. Body: ``{minutes}`` → ``{ok, meta, conflict}``. The extension is always
+    applied; ``conflict`` is a warning the new end overlaps the driver's next order.
+    Allowed for the driver or a dispatcher (the frontend gates the button)."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        try:
+            minutes = int(request.data.get("minutes", 0))
+        except (TypeError, ValueError):
+            minutes = 0
+        if minutes <= 0:
+            return _bad_request("VALIDATION", _("`minutes` must be a positive integer."))
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        if meta is None or not meta.estimated_duration:
+            return _bad_request("VALIDATION", _("No schedule to extend for this order."))
+        meta.estimated_duration += minutes
+        meta.save()
+        conflict = None
+        if meta.driver_id and meta.planned_datetime:
+            conflict = scheduling.meta_conflict(
+                meta.driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+            )
+        return Response(
+            {
+                "ok": True,
+                "meta": OrderMetaSerializer(meta).data,
+                "conflict": None
+                if conflict is None
+                else {
+                    "order_id": conflict.order_id,
+                    "planned_start": conflict.planned_datetime,
+                    "planned_end": conflict.planned_end,
+                    "address": f"Заказ #{conflict.order_id}",
+                },
+            }
+        )
+
+
+class ReassignView(APIView):
+    """Dispatcher takes an order off its driver and returns it to the queue
+    (overlay). Frees our claim — the order stops blocking the driver's schedule
+    and the simulator — and pushes a ``cancelled`` trip-state over the WebSocket,
+    so another driver can pick it up. A plain demo claim is owned by demo and
+    can't be reassigned from here (only overlay-claimed orders). Idempotent."""
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        meta = OrderMeta.objects.filter(order_id=pk).first()
+        if meta is None:
+            return _bad_request("NOT_FOUND", _("Nothing to reassign for this order."))
+        meta.overlay_claimed = False
+        meta.driver_id = None
+        meta.car_id = None
+        meta.car_label = ""
+        meta.trip_state = OrderMeta.TripState.CANCELLED
+        meta.save()
+        layer = get_channel_layer()
+        if layer is not None:
+            from car_orders.ws import group_name
+
+            async_to_sync(layer.group_send)(
+                group_name(pk),
+                {"type": "location.update", "data": {"trip_state": "cancelled"}},
+            )
+        return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
+
+
 class DriverLocationView(APIView):
     """The driver app posts its GPS ONCE here; the server attaches it to the
     driver's currently-moving order(s) (to_client / in_trip) and fans it out over

@@ -160,6 +160,22 @@ Includes **both demo- and overlay-claimed** orders (both have `driver_id`). Use 
 
 ---
 
+## 3.9 Extend / Reassign an order
+
+`POST /car-orders/{id}/extend/` `{ "minutes": 30 }` → `{ "ok": true, "meta": {...}, "conflict": null }`
+Adds minutes to `estimated_duration` (pushes `planned_end` out). The extension is **always** applied;
+`conflict` (when not `null`) only warns that the new end now overlaps the driver's next order. Allowed
+for the driver or a dispatcher. `400 VALIDATION` — `minutes` not positive, or the order has no saved
+window.
+
+`POST /car-orders/{id}/reassign/` (no body) → `{ "ok": true, "meta": {...} }`
+A dispatcher takes the order off its driver and returns it to the queue (same as `overlay-release`, but
+it's the **dispatcher's** action): `overlay_claimed=false`, `driver_id=null`, `trip_state=cancelled`,
+pushes `cancelled` over WS — the order is available to another driver again. Works for overlay-claimed
+orders (a demo claim is owned by demo and can't be reassigned from here). `400 NOT_FOUND` — no meta.
+
+---
+
 ## Effective status for the UI (important)
 An overlay-claimed order keeps a demo status of `awaiting_driver`. Don’t show that — derive it:
 - if `meta.overlay_claimed && trip_state ∉ {completed, cancelled}` → show it **as “in progress”**,
