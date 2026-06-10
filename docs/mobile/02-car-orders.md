@@ -44,7 +44,6 @@ Query-параметры:
   "planned_datetime": "2026-06-11T09:00:00Z",
   "address": "Амира Тимура проспект, Ташкент",
   "note": "Забрать оборудование",
-  "comment": "",
   "car_type": { "id": 4, "name": "Легковая" },
   "driver": { "id": 671, "name": "Иван Водитель" },
   "car": { "id": 5, "model": "Cobalt", "plate_number": "01A777AA" },
@@ -79,7 +78,6 @@ Query-параметры:
   "planned_datetime": "2026-06-11T09:00:00Z",
   "address": "Амира Тимура проспект, Ташкент",
   "note": "Забрать оборудование",
-  "comment": "",
   "car_type_id": 4
 }
 ```

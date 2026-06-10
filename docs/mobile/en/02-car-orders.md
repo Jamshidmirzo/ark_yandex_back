@@ -44,7 +44,6 @@ Response `200` — a **CarOrder**:
   "planned_datetime": "2026-06-11T09:00:00Z",
   "address": "Amir Temur ave, Tashkent",
   "note": "Pick up equipment",
-  "comment": "",
   "car_type": { "id": 4, "name": "Sedan" },
   "driver": { "id": 671, "name": "Ivan Driver" },
   "car": { "id": 5, "model": "Cobalt", "plate_number": "01A777AA" },
@@ -79,7 +78,6 @@ Required: `project_name`, `planned_datetime` (ISO-8601 UTC), `address`, `car_typ
   "planned_datetime": "2026-06-11T09:00:00Z",
   "address": "Amir Temur ave, Tashkent",
   "note": "Pick up equipment",
-  "comment": "",
   "car_type_id": 4
 }
 ```
