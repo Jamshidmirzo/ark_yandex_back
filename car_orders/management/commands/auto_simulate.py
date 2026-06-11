@@ -207,7 +207,13 @@ class Command(BaseCommand):
                     if loop:
                         idx = 0  # demo: re-drive the same leg for continuous motion
                     else:
-                        continue  # arrived → stays put until the driver advances the stage
+                        # Arrived at the leg end — keep the position FRESH (heartbeat),
+                        # like a real phone still sending GPS while stopped. Otherwise
+                        # the fix goes stale (>30 s) and the driver's «Прибыли на место»
+                        # button stays blocked even though they're right at the point.
+                        last = path[-1]
+                        post(oid, {"lat": last[1], "lng": last[0]})
+                        continue
                 lng, lat = path[idx]
                 post(oid, {"lat": lat, "lng": lng})
                 driver_pos[drv] = [lng, lat]
