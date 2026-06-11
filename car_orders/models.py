@@ -393,6 +393,11 @@ class OrderMeta(TimestampMixin):
     # Set once we've reminded the driver it's time to head to this order, so the
     # «пора выезжать» nudge fires only once.
     departure_reminded = models.BooleanField(default=False, verbose_name=_("Departure reminded"))
+    # For a return/pickup sub-order created together with the main one («отвёз и
+    # забери обратно»): the main order's id. Null for a normal order.
+    parent_order_id = models.PositiveIntegerField(
+        null=True, blank=True, db_index=True, verbose_name=_("Parent order id")
+    )
     # Overlay claim: the car the driver took the order with (so a second order
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
