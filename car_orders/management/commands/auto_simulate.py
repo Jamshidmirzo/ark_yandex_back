@@ -49,15 +49,19 @@ def one_moving_order_per_driver(orders):
     return list(best.values())
 
 
-def leg_endpoints(state, driver_pos, origin, dest):
+def leg_endpoints(state, driver_pos, origin, dest, returning=False, return_pt=None):
     """``(start, end)`` ``[lng, lat]`` for the current moving leg.
 
     - ``to_client`` → drive from the driver's current position to the pickup
       (``origin``); if the position is unknown, start at the pickup (no approach).
-    - ``in_trip`` → drive the loaded leg pickup → destination (always).
+    - ``in_trip`` (outbound) → drive the loaded leg pickup → destination.
+    - ``in_trip`` while ``returning`` (round trip) → drive the RETURN leg
+      destination → return point (falls back to the pickup if none set).
     """
     if state == OrderMeta.TripState.TO_CLIENT:
         return (list(driver_pos) if driver_pos else list(origin)), list(origin)
+    if returning:
+        return list(dest), list(return_pt or origin)
     return list(origin), list(dest)
 
 
@@ -145,28 +149,37 @@ class Command(BaseCommand):
                 row = (
                     OrderMeta.objects.filter(order_id=oid)
                     .values_list(
-                        "trip_state", "origin_lng", "origin_lat", "address_lng", "address_lat"
+                        "trip_state",
+                        "origin_lng",
+                        "origin_lat",
+                        "address_lng",
+                        "address_lat",
+                        "returning",
+                        "return_lng",
+                        "return_lat",
                     )
                     .first()
                 )
                 if row is None:
                     forget(oid)
                     continue
-                state, o_lng, o_lat, a_lng, a_lat = row
+                state, o_lng, o_lat, a_lng, a_lat, returning, r_lng, r_lat = row
                 if state not in MOVING or None in (o_lng, o_lat, a_lng, a_lat):
                     forget(oid)
                     continue
 
                 origin = [o_lng, o_lat]
                 dest = [a_lng, a_lat]
+                return_pt = [r_lng, r_lat] if r_lng is not None and r_lat is not None else None
                 start, end = leg_endpoints(
-                    state, driver_pos.get(drv) or seed_pos(drv), origin, dest
+                    state, driver_pos.get(drv) or seed_pos(drv), origin, dest, returning, return_pt
                 )
 
-                # Leg identity is the stage + its endpoint; it does NOT include the
-                # live position, so the route is built once and not re-routed as
-                # the marker advances. A stage change (different end) rebuilds it.
-                key = (state, round(end[0], 6), round(end[1], 6))
+                # Leg identity is the stage + its endpoint (+ the return flag, since
+                # outbound and return share the in_trip stage but end differently);
+                # it does NOT include the live position, so the route is built once
+                # and not re-routed as the marker advances.
+                key = (state, returning, round(end[0], 6), round(end[1], 6))
                 if seg_key.get(oid) != key:
                     route = services.estimate_route(start[1], start[0], end[1], end[0])
                     geom = route["geometry"]
@@ -176,7 +189,13 @@ class Command(BaseCommand):
                     first = seg_route[oid][0]
                     driver_pos[drv] = [first[0], first[1]]
                     post(oid, {"lat": first[1], "lng": first[0], "geometry": geom})
-                    leg = "→ подача" if state == OrderMeta.TripState.TO_CLIENT else "с клиентом"
+                    leg = (
+                        "→ подача"
+                        if state == OrderMeta.TripState.TO_CLIENT
+                        else "← обратно"
+                        if returning
+                        else "с клиентом"
+                    )
                     self.stdout.write(f"  + order {oid} ({leg}): {len(seg_route[oid])} points")
                     continue
 

@@ -337,6 +337,10 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "origin_lng",
             "address_lat",
             "address_lng",
+            "has_return",
+            "return_lat",
+            "return_lng",
+            "returning",
             "estimated_duration",
             "service_time",
             "planned_datetime",
@@ -346,7 +350,9 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "at_risk",
             "is_late",
         ]
-        read_only_fields = ["order_id", "planned_end", "at_risk", "is_late"]
+        # `returning` is driven by the trip-state transition (not the form), so it's
+        # read-only here — only TripStateView flips it on the return leg.
+        read_only_fields = ["order_id", "returning", "planned_end", "at_risk", "is_late"]
 
     def get_at_risk(self, obj) -> bool:
         from django.utils import timezone

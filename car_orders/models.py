@@ -410,6 +410,17 @@ class OrderMeta(TimestampMixin):
     origin_lng = models.FloatField(null=True, blank=True)
     address_lat = models.FloatField(null=True, blank=True)
     address_lng = models.FloatField(null=True, blank=True)
+    # «Туда-обратно» as ONE order: after dropping at the destination the driver
+    # waits on site (shoot), then drives a RETURN leg to `return_*` (defaults to
+    # the pickup if not set). No return time — the shoot end is unknown, so the
+    # driver starts the return manually when it's over.
+    has_return = models.BooleanField(default=False, verbose_name=_("Has return leg"))
+    return_lat = models.FloatField(null=True, blank=True)
+    return_lng = models.FloatField(null=True, blank=True)
+    # True once the driver has STARTED the return leg (destination → return point),
+    # so the simulator/map drive the second leg and «Завершить» appears only after
+    # the return is done.
+    returning = models.BooleanField(default=False, verbose_name=_("On the return leg"))
     estimated_duration = models.PositiveIntegerField(
         null=True, blank=True, verbose_name=_("Estimated duration (minutes)")
     )

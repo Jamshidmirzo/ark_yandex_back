@@ -408,7 +408,8 @@ class OverlayClaimView(APIView):
             )
             if _created or meta.trip_state in terminal:
                 meta.trip_state = OrderMeta.TripState.ASSIGNED
-                meta.save(update_fields=["trip_state"])
+                meta.returning = False  # start the trip from the first leg again
+                meta.save(update_fields=["trip_state", "returning"])
         notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
@@ -451,12 +452,24 @@ class TripStateView(APIView):
                     "ACTIVE_TRIP_EXISTS",
                     _("Finish the current trip before starting another."),
                 )
-        meta, _created = OrderMeta.objects.update_or_create(
-            order_id=pk, defaults={"trip_state": state}
-        )
+        defaults = {"trip_state": state}
+        # Round trip: leaving the destination (at_destination/waiting) back INTO a
+        # moving stage means the driver started the RETURN leg → flip `returning`
+        # so the simulator/map drive destination → return point and «Завершить»
+        # only shows once that leg is done.
+        if (
+            existing
+            and existing.has_return
+            and not existing.returning
+            and state == OrderMeta.TripState.IN_TRIP
+            and existing.trip_state
+            in (OrderMeta.TripState.AT_DESTINATION, OrderMeta.TripState.WAITING)
+        ):
+            defaults["returning"] = True
+        meta, _created = OrderMeta.objects.update_or_create(order_id=pk, defaults=defaults)
         if state in (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED):
             _clear_live_location(pk)
-        broadcast_location(pk, {"trip_state": state})
+        broadcast_location(pk, {"trip_state": state, "returning": meta.returning})
         notify_order_status(meta, state)  # toast to driver + requester
         return Response(OrderMetaSerializer(meta).data)
 
@@ -480,6 +493,7 @@ class OverlayReleaseView(APIView):
         meta.car_id = None
         meta.car_label = ""
         meta.trip_state = OrderMeta.TripState.CANCELLED
+        meta.returning = False
         meta.save()
         _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": "cancelled"})
@@ -552,6 +566,7 @@ class ReassignView(APIView):
         meta.car_id = None
         meta.car_label = ""
         meta.trip_state = OrderMeta.TripState.CANCELLED
+        meta.returning = False
         meta.save()
         _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": "cancelled"})
