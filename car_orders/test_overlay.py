@@ -241,6 +241,29 @@ def test_can_start_gap_order_while_parked_at_a_shoot():
 
 
 @pytest.mark.django_db
+def test_remind_departures_fires_once_for_upcoming():
+    now = timezone.now()
+    OrderMeta.objects.create(  # within the 20-min lead → reminded
+        order_id=820,
+        driver_id=5,
+        trip_state=OrderMeta.TripState.ASSIGNED,
+        planned_datetime=now + timedelta(minutes=10),
+    )
+    OrderMeta.objects.create(  # too far off → not yet
+        order_id=821,
+        driver_id=5,
+        trip_state=OrderMeta.TripState.ASSIGNED,
+        planned_datetime=now + timedelta(hours=3),
+    )
+    call_command("remind_departures", stdout=StringIO())
+    assert OrderMeta.objects.get(order_id=820).departure_reminded is True
+    assert OrderMeta.objects.get(order_id=821).departure_reminded is False
+    # a second pass must NOT re-remind the same order
+    call_command("remind_departures", stdout=StringIO())
+    assert OrderMeta.objects.get(order_id=820).departure_reminded is True
+
+
+@pytest.mark.django_db
 def test_order_watchdog_release_frees_late_unstarted_but_not_active():
     now = timezone.now()
     OrderMeta.objects.create(  # late, accepted, not started → should be released

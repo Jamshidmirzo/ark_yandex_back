@@ -390,6 +390,9 @@ class OrderMeta(TimestampMixin):
     )
     # Urgent (e.g. for a live broadcast) — sorted first and flagged for dispatch.
     is_urgent = models.BooleanField(default=False, verbose_name=_("Urgent"))
+    # Set once we've reminded the driver it's time to head to this order, so the
+    # «пора выезжать» nudge fires only once.
+    departure_reminded = models.BooleanField(default=False, verbose_name=_("Departure reminded"))
     # Overlay claim: the car the driver took the order with (so a second order
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
