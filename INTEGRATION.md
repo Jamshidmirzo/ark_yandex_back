@@ -143,6 +143,11 @@ already use `rejected`, fields line up.
 
 ## 6. Scheduling & live-tracking extension
 
+> **Note.** §6 describes the original **standalone** scheduler (own `scheduled`/
+> `start` flow, hard `TIME_CONFLICT`). In the running demo this is superseded by
+> the **hybrid overlay** in §7: orders live in the demo backend and the schedule/
+> trip-state are tracked locally in `OrderMeta`. Read §7 for the current behaviour.
+
 This block now models a **planned** dispatch flow (a driver's day is a set of
 non-overlapping time windows) on top of the original workflow, plus an
 auto-estimate and a movement simulator. See `car_orders/scheduling.py`.
@@ -198,3 +203,105 @@ python manage.py simulate_driver --order <id> --steps 60 --interval 2
 
 Interpolates the order's A→B route and writes positions to the driver's active
 shift, so the dispatcher map (polling `driver_location`) shows the car moving.
+
+---
+
+## 7. Hybrid overlay layer (current live architecture)
+
+In the running demo, `ark_yandex` is a **gateway + overlay**, not a standalone
+backend: login, drivers, garage and the base car-orders CRUD are **proxied** to
+the demo backend (`UPSTREAM_API_BASE`, e.g. `demo.ark.glob.uz/ru/api/v1`), while
+the new features are served **locally** from an `OrderMeta` overlay keyed by the
+demo order id. Local routes are mounted **before** the gateway catch-all
+(`config/urls.py`); everything else falls through upstream. demo stays the source
+of truth for auth/data — **never break that proxy**.
+
+Mobile clients may call the language-prefixed scheme `/<lang>/api/v1/...` and
+`/healthcheck/` — `MobileLanguagePrefixMiddleware` strips the prefix. CORS in
+`DEBUG` allows any `localhost`/`127.0.0.1` port + the LAN.
+
+### 7.1 Trip-state machine (overlay)
+
+`OrderMeta.trip_state`: `assigned → to_client → at_client → in_trip →
+at_destination → completed` (+ `waiting` optional pause, `cancelled`). The UI
+renders **perspective-aware** wording (driver vs client/requester).
+
+| Method | Path (`/api/v1/car-orders/…`) | Effect |
+|---|---|---|
+| POST | `/{id}/trip-state/` | `{trip_state}` → advance the stage; pushed over WS + toasts **driver & requester** |
+| GET·POST | `/{id}/meta/` | read / upsert the overlay (coords, window, return, …) |
+| POST | `/{id}/overlay-claim/` | claim in OUR layer — sequential **same car** (which demo forbids); returns `{ok, conflict, meta}` |
+| POST | `/{id}/overlay-release/` | tear the overlay down (reject / cancel / release / reassign) |
+| POST | `/{id}/claim-check/` · `/claim-check-batch/` | `{driver_id}` → `{ok, conflict}` schedule pre-check (advisory) |
+| POST | `/{id}/reassign/` | dispatcher takes the order off its driver |
+| POST | `/{id}/extend/` | `{minutes}` → grow the planned window, returns `{ok, meta, conflict}` |
+| POST | `/estimate/` | route A→B → `{distance_m, drive_minutes, duration_minutes, geometry:[[lng,lat]…]}` |
+| GET | `/fleet/live/` | dispatcher snapshot: every active order + live pos + route |
+| GET·POST | `/{id}/live-location/` | read / write the order's live position |
+| POST | `/drivers/me/location/` | GPS heartbeat (drives the live map) |
+
+**WebSockets:** `/ws/car-orders/{id}/location/` (per-order pos + `trip_state` +
+`returning`), `/ws/car-orders/fleet/` (dispatcher), `/ws/notifications/{user_id}/`
+(per-user toasts to **driver AND requester**). InMemory channel layer in dev;
+Redis via `REDIS_URL` in prod (daphne/Channels).
+
+### 7.2 Arrival geofence (100 m)
+
+The «Я на месте» / «Прибыли на место» buttons unlock only within **100 m** of the
+relevant point **and** with a fresh GPS fix — arrival can't be marked from afar.
+The pin may sit inside a building the car can't enter, so 100 m means "at the
+entrance", not "on the pin". Frontend gate; the backend does not reject by distance.
+
+### 7.3 Round trip («туда-обратно») as ONE order
+
+A round trip is a single order, not a separate sub-order:
+`OrderMeta.has_return` + `return_lat/lng` (drop-back point; defaults to the pickup)
++ `returning` (the active return leg) — migration `0014`. **No return time** (the
+shoot end is unknown, so the driver starts the return manually). Flow:
+`… → at_destination` shows **«Выехать обратно»** (not «Завершить») → that begins
+the return leg `destination → return point` → on arrival → **«Завершить»**.
+`returning` is inferred in `TripStateView` (broadcast over WS so the app flips
+instantly) and reset on (re)claim / release.
+
+### 7.4 Gap-filling — a schedule overlap is a WARNING, not a block
+
+Keeping a driver busy during a long shoot is the product's whole point, so:
+
+- **On-site time is FREE.** `scheduling.meta_conflict` uses
+  `driving_end = planned_end − service_time`; an order only "occupies" the driver
+  while DRIVING, so a long on-site wait doesn't reserve the window against others.
+- **Overlap never hard-blocks a claim.** `overlay-claim` proceeds and returns the
+  overlap as `conflict` for the UI to show as a warning. The **only** hard block
+  left is an order already taken by a **different** driver. A late return is
+  surfaced via `at_risk` («Под угрозой»), not by forbidding the gap order.
+- **One drive at a time still holds:** `TripStateView` blocks starting a 2nd
+  MOVING stage (`to_client`/`in_trip`) while another order is actively moving.
+
+### 7.5 Dispatcher («Диспетчерская», `/orders/fleet`)
+
+A live board of every active order, gated by `car_order:list | approve`: a Yandex
+map with a coloured marker per car + its A→B route (🟢 pickup, 🔴 destination) and
+a **traffic** layer, plus rich cards — откуда→куда, project, подача / ориент.
+окончание, время на месте, «Туда-обратно» / «Везёт обратно», risk and GPS.
+Urgent / at-risk / late orders beep + toast.
+
+### 7.6 Misc
+
+- «Принять» is hidden for a user with **no assigned car** (a dispatcher/admin
+  can't claim anyway).
+- `is_urgent` orders sort first, flag red and beep in the dispatcher.
+- Empty pickup time = «сейчас / ASAP» (the form defaults it on create).
+
+### 7.7 Simulator (phase-aware) + reminders
+
+```bash
+python manage.py runserver 0.0.0.0:8000 --noreload   # web + WS (daphne)
+python manage.py auto_simulate --interval 1.5         # drive every active order
+python manage.py remind_departures --loop             # «пора выезжать» nudges
+```
+
+`auto_simulate` drives the live position **per phase**: `to_client` =
+driver→pickup, `in_trip` = pickup→destination, and the **return leg**
+destination→return point while `returning`. Do **not** pass `--loop` (it re-drives
+a finished leg from the start). The older `simulate_driver` (§6) targets the
+standalone scheduler.
