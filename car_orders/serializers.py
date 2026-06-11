@@ -328,6 +328,7 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "order_id",
             "driver_id",
             "author_id",
+            "is_urgent",
             "car_id",
             "car_label",
             "overlay_claimed",

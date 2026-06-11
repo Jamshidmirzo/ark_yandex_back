@@ -388,6 +388,8 @@ class OrderMeta(TimestampMixin):
     author_id = models.PositiveIntegerField(
         null=True, blank=True, db_index=True, verbose_name=_("Author user id")
     )
+    # Urgent (e.g. for a live broadcast) — sorted first and flagged for dispatch.
+    is_urgent = models.BooleanField(default=False, verbose_name=_("Urgent"))
     # Overlay claim: the car the driver took the order with (so a second order
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
