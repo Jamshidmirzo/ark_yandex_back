@@ -28,6 +28,7 @@ from car_orders.models import (
     Car,
     CarOrder,
     CarType,
+    DriverPosition,
     DriverShift,
     OrderLiveLocation,
     OrderMeta,
@@ -597,9 +598,16 @@ class DriverLocationView(APIView):
         serializer.is_valid(raise_exception=True)
         lat = serializer.validated_data["lat"]
         lng = serializer.validated_data["lng"]
+        now = timezone.now()
+        # Per-driver position — stored on EVERY heartbeat, even when the driver is
+        # free (no active order), so the dispatcher can find the nearest available
+        # driver for an awaiting order.
+        if driver_id is not None:
+            DriverPosition.objects.update_or_create(
+                driver_id=driver_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
+            )
         moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
         metas = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=moving)
-        now = timezone.now()
         updated = []
         for meta in metas:
             OrderLiveLocation.objects.update_or_create(
@@ -611,6 +619,35 @@ class DriverLocationView(APIView):
                 meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()}
             )
         return Response({"updated_orders": updated})
+
+
+class DriverPositionsView(APIView):
+    """Latest position per driver → `{ "671": {lat, lng, last_seen}, ... }`. Powers
+    the dispatcher's «nearest free driver» suggestion. Optional `?max_age=600`
+    (seconds) drops stale fixes."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        qs = DriverPosition.objects.all()
+        try:
+            max_age = int(request.query_params.get("max_age", 0))
+        except (TypeError, ValueError):
+            max_age = 0
+        if max_age > 0:
+            cutoff = timezone.now() - timedelta(seconds=max_age)
+            qs = qs.filter(last_seen__gte=cutoff)
+        return Response(
+            {
+                str(p.driver_id): {
+                    "lat": p.lat,
+                    "lng": p.lng,
+                    "last_seen": p.last_seen.isoformat(),
+                }
+                for p in qs
+            }
+        )
 
 
 class MyOverlayOrdersView(APIView):

@@ -361,6 +361,25 @@ class OrderLiveLocation(models.Model):
         return f"LiveLocation order={self.order_id} ({self.lat}, {self.lng})"
 
 
+class DriverPosition(models.Model):
+    """Latest GPS position **per driver** (not per order). The driver app posts a
+    heartbeat even when the driver is FREE (no active order), so the dispatcher
+    can find the nearest available driver for an awaiting order. Keyed by the
+    driver (demo) user id."""
+
+    driver_id = models.PositiveIntegerField(unique=True, db_index=True, verbose_name=_("Driver id"))
+    lat = models.FloatField(verbose_name=_("Latitude"))
+    lng = models.FloatField(verbose_name=_("Longitude"))
+    last_seen = models.DateTimeField(verbose_name=_("Last seen"))
+
+    class Meta:
+        verbose_name = _("Driver position")
+        verbose_name_plural = _("Driver positions")
+
+    def __str__(self):
+        return f"DriverPosition driver={self.driver_id} ({self.lat}, {self.lng})"
+
+
 class OrderMeta(TimestampMixin):
     """Local feature overlay for an order that lives in the demo backend.
 
