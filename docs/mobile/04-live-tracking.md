@@ -26,9 +26,12 @@ wss://<ваш-домен>/ws/car-orders/{order_id}/location/        (прод)
 
 Сообщение со сменой этапа:
 ```json
-{ "trip_state": "at_client" }
+{ "trip_state": "in_trip", "returning": true }
 ```
 - Приходит при вызове `trip-state/`. Обновляй баннер статуса у заказчика.
+- `returning` — флаг **обратной ноги** туда-обратно (раздел 03 §3.6.1). Приходит вместе со сменой
+  этапа; `returning:true` после `at_destination` означает, что водитель поехал назад (точка возврата).
+  Сохраняй его, как `geometry`.
 - `trip_state: "completed"` — заказ завершён; `trip_state: "cancelled"` — заказ снят
   (`overlay-release`). На обоих закрывай панель трекинга и отключай WS.
 
@@ -50,6 +53,7 @@ ch.stream.listen((raw) {
   if (m['geometry'] != null) geometry = (m['geometry'] as List).map<List<double>>(
       (p) => [(p[0] as num).toDouble(), (p[1] as num).toDouble()]).toList();
   if (m['trip_state'] != null) tripState = m['trip_state'];
+  if (m['returning'] != null) returning = m['returning'] as bool; // обратная нога
   setState(() {});
 });
 ```

@@ -26,9 +26,12 @@ Position message:
 
 Stage-change message:
 ```json
-{ "trip_state": "at_client" }
+{ "trip_state": "in_trip", "returning": true }
 ```
 - Sent when `trip-state/` is called. Update the client’s status banner.
+- `returning` — the **return-leg** flag of a round trip (section 03 §3.6.1). Arrives with the stage
+  change; `returning:true` after `at_destination` means the driver headed back (return point). Keep it,
+  like `geometry`.
 - `trip_state: "completed"` — order finished; `trip_state: "cancelled"` — order dropped
   (`overlay-release`). On either, close the tracking panel and the WS.
 
@@ -50,6 +53,7 @@ ch.stream.listen((raw) {
   if (m['geometry'] != null) geometry = (m['geometry'] as List).map<List<double>>(
       (p) => [(p[0] as num).toDouble(), (p[1] as num).toDouble()]).toList();
   if (m['trip_state'] != null) tripState = m['trip_state'];
+  if (m['returning'] != null) returning = m['returning'] as bool; // return leg
   setState(() {});
 });
 ```

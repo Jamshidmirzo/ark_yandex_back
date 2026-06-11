@@ -16,9 +16,12 @@
 
 ## Trip stage (`OrderMeta.trip_state`, our layer)
 
-`assigned → to_client → at_client → in_trip → at_destination → waiting → completed`
-plus the terminal `cancelled` (after `overlay-release`).
-Labels and buttons — [03-scheduling-overlay.md](03-scheduling-overlay.md) §3.6.
+`assigned → to_client → at_client → in_trip → at_destination → completed`
+(`waiting` — optional manual pause; `cancelled` — terminal, after `overlay-release`).
+A normal order **completes** at `at_destination`. **Round trip** (`has_return`): at `at_destination`
+the button is “drive back” → another `in_trip` (`returning=true`) → `at_destination` → “Complete”.
+Arrival geofence — **100 m** + a fresh GPS fix. Labels and buttons —
+[03-scheduling-overlay.md](03-scheduling-overlay.md) §3.6 / §3.6.1.
 
 ## Permissions (codename)
 `car_order:create`, `car_order:approve`, `car_order:reject`, `car_order:list` / `:list_own`,
@@ -36,8 +39,8 @@ normalise: “if there’s `results` use it, else the array itself”.
 | code | HTTP | When |
 |---|---|---|
 | `VALIDATION` | 400 | bad body / `trip_state` |
-| `TIME_CONFLICT` | 200/409 | window overlap (in `claim-check`/`overlay-claim` — the `conflict` field) |
-| `ALREADY_CLAIMED` | 400 | `overlay-claim` of someone else’s active order |
+| `conflict` (field) | 200 | window overlap — **a warning, not a block**: `claim-check`/`overlay-claim` return `conflict`, but the claim still goes through (§3.3–3.4) |
+| `ALREADY_CLAIMED` | 400 | `overlay-claim` of someone else’s active order — **the only hard block** |
 | `INVALID_STATUS` | 400 | changing `trip_state` of a completed order |
 | `NOT_FOUND` | 400 | no meta/window (e.g. `reassign`/`extend` without an overlay) |
 
