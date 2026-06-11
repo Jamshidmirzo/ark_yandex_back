@@ -50,7 +50,7 @@ from car_orders.serializers import (
     ShiftStartSerializer,
     VehicleReportSerializer,
 )
-from car_orders.ws import broadcast_location
+from car_orders.ws import broadcast_location, notify_order_status
 from config.auth import DemoTokenAuthentication
 
 User = get_user_model()
@@ -76,6 +76,22 @@ def _clear_live_location(pk):
     """Drop the stored live position once an order is done/cancelled/reassigned,
     so a dead marker doesn't linger on the map or in «Мои заказы»."""
     OrderLiveLocation.objects.filter(order_id=pk).delete()
+
+
+def _notify_dropped_driver(driver_id, order_id):
+    """Tell the driver an order was taken off them (reassign / release)."""
+    if driver_id is None:
+        return
+    from car_orders.ws import notify_user
+
+    notify_user(
+        driver_id,
+        {
+            "order_id": int(order_id),
+            "trip_state": "cancelled",
+            "message": "Заказ снят с вас / возвращён в очередь",
+        },
+    )
 
 
 def _conflict_payload(order):
@@ -393,6 +409,7 @@ class OverlayClaimView(APIView):
             if _created or meta.trip_state in terminal:
                 meta.trip_state = OrderMeta.TripState.ASSIGNED
                 meta.save(update_fields=["trip_state"])
+        notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -440,6 +457,7 @@ class TripStateView(APIView):
         if state in (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED):
             _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": state})
+        notify_order_status(meta, state)  # toast to driver + requester
         return Response(OrderMetaSerializer(meta).data)
 
 
@@ -456,6 +474,7 @@ class OverlayReleaseView(APIView):
         meta = OrderMeta.objects.filter(order_id=pk).first()
         if meta is None:
             return Response({"ok": True})
+        prev_driver = meta.driver_id
         meta.overlay_claimed = False
         meta.driver_id = None
         meta.car_id = None
@@ -464,6 +483,9 @@ class OverlayReleaseView(APIView):
         meta.save()
         _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": "cancelled"})
+        # Notify the requester + the driver who was on it.
+        notify_order_status(meta, OrderMeta.TripState.CANCELLED)
+        _notify_dropped_driver(prev_driver, pk)
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -524,6 +546,7 @@ class ReassignView(APIView):
         meta = OrderMeta.objects.filter(order_id=pk).first()
         if meta is None:
             return _bad_request("NOT_FOUND", _("Nothing to reassign for this order."))
+        prev_driver = meta.driver_id
         meta.overlay_claimed = False
         meta.driver_id = None
         meta.car_id = None
@@ -532,6 +555,8 @@ class ReassignView(APIView):
         meta.save()
         _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": "cancelled"})
+        notify_order_status(meta, OrderMeta.TripState.CANCELLED)  # author
+        _notify_dropped_driver(prev_driver, pk)  # the driver taken off
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 

@@ -20,6 +20,47 @@ def group_name(order_id) -> str:
 FLEET_GROUP = "fleet_live"
 
 
+def user_group(user_id) -> str:
+    return f"user_{user_id}"
+
+
+# Human-readable status messages pushed to the driver + requester.
+_TRIP_MESSAGES = {
+    "assigned": "Водитель назначен",
+    "to_client": "Водитель выехал к месту подачи",
+    "at_client": "Водитель на месте подачи",
+    "in_trip": "Поездка началась",
+    "at_destination": "Прибыли на место назначения",
+    "waiting": "Поездка на паузе (ожидание)",
+    "completed": "Заказ завершён",
+    "cancelled": "Заказ отменён / возвращён в очередь",
+}
+
+
+def notify_user(user_id, payload):
+    """Push an event to a single user's group (their app shows a toast)."""
+    if user_id is None:
+        return
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+
+    layer = get_channel_layer()
+    if layer is None:
+        return
+    async_to_sync(layer.group_send)(user_group(user_id), {"type": "notify.event", "data": payload})
+
+
+def notify_order_status(meta, trip_state):
+    """Notify BOTH the driver and the order's author of a status change."""
+    payload = {
+        "order_id": meta.order_id,
+        "trip_state": trip_state,
+        "message": _TRIP_MESSAGES.get(trip_state, trip_state),
+    }
+    notify_user(meta.driver_id, payload)
+    notify_user(getattr(meta, "author_id", None), payload)
+
+
 def broadcast_location(order_id, data):
     """Push a position / trip-state frame to the order's own group AND the fleet
     group (the latter tagged with order_id), so both the per-order tracker and the
@@ -94,7 +135,24 @@ class FleetConsumer(AsyncJsonWebsocketConsumer):
         return fleet_live_orders()
 
 
+class NotificationConsumer(AsyncJsonWebsocketConsumer):
+    """Per-user notification stream: the driver and the requester subscribe to
+    their own group and get a toast on every status change of their orders."""
+
+    async def connect(self):
+        self.uid = self.scope["url_route"]["kwargs"]["user_id"]
+        await self.channel_layer.group_add(user_group(self.uid), self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, code):
+        await self.channel_layer.group_discard(user_group(self.uid), self.channel_name)
+
+    async def notify_event(self, event):
+        await self.send_json(event["data"])
+
+
 websocket_urlpatterns = [
     re_path(r"^ws/car-orders/fleet/$", FleetConsumer.as_asgi()),
+    re_path(r"^ws/notifications/(?P<user_id>\d+)/$", NotificationConsumer.as_asgi()),
     re_path(r"^ws/car-orders/(?P<order_id>\d+)/location/$", LiveLocationConsumer.as_asgi()),
 ]

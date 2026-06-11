@@ -327,6 +327,7 @@ class OrderMetaSerializer(serializers.ModelSerializer):
         fields = [
             "order_id",
             "driver_id",
+            "author_id",
             "car_id",
             "car_label",
             "overlay_claimed",

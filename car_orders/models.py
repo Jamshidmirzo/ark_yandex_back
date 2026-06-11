@@ -383,6 +383,11 @@ class OrderMeta(TimestampMixin):
     driver_id = models.PositiveIntegerField(
         null=True, blank=True, db_index=True, verbose_name=_("Driver user id")
     )
+    # Who created the order (demo user id) — so status changes can be pushed to
+    # the requester, not just the driver. Saved by the frontend at create time.
+    author_id = models.PositiveIntegerField(
+        null=True, blank=True, db_index=True, verbose_name=_("Author user id")
+    )
     # Overlay claim: the car the driver took the order with (so a second order
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
