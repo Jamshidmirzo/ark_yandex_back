@@ -34,7 +34,17 @@ def meta_conflict(driver_id, start, end, exclude_order_id=None, buffer=None):
         buffer = travel_buffer()
     lo, hi = start - buffer, end + buffer
     qs = OrderMeta.objects.filter(driver_id=driver_id).exclude(
-        trip_state__in=(OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+        trip_state__in=(
+            OrderMeta.TripState.COMPLETED,
+            OrderMeta.TripState.CANCELLED,
+            # Parked on-site during a (long) shoot — the driver is physically idle
+            # and free to fill the gap with another order, so a parked order must
+            # NOT block a new claim. This is the core gap-filling feature: keep the
+            # driver busy during the wait. A late return is surfaced via `at_risk`,
+            # not by forbidding the gap order.
+            OrderMeta.TripState.AT_DESTINATION,
+            OrderMeta.TripState.WAITING,
+        )
     )
     if exclude_order_id is not None:
         qs = qs.exclude(order_id=exclude_order_id)
