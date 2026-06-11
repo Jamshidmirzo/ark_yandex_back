@@ -92,10 +92,22 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Channels / WebSockets (live driver tracking). In-memory layer is fine for the
-# single-process dev server; use Redis (channels_redis) for multi-process / prod.
+# Channels / WebSockets (live driver tracking, fleet dashboard, notifications).
+# In-memory is fine for the single-process dev server, but it loses all groups on
+# restart and can't span workers. Set REDIS_URL in prod (needs
+# `pip install channels_redis`) for a durable, multi-process layer — required once
+# the dispatcher fleet view and per-user notifications run for real.
 ASGI_APPLICATION = "config.asgi.application"
-CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+REDIS_URL = env("REDIS_URL", default="")
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
+    }
+else:
+    CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 
 
 # Database

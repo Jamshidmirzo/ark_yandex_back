@@ -8,4 +8,6 @@ django-cors-headers>=4.4,<5.0
 psycopg[binary]>=3.2,<3.3
 gunicorn>=23.0,<24.0
 channels==4.3.2
+# Prod WebSocket layer (multi-process / durable); activated by REDIS_URL.
+channels_redis>=4.2,<5.0
 daphne==4.2.2
