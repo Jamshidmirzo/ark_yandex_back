@@ -49,12 +49,27 @@ def meta_conflict(driver_id, start, end, exclude_order_id=None, buffer=None):
     if exclude_order_id is not None:
         qs = qs.exclude(order_id=exclude_order_id)
     for m in qs:
-        o_start, o_end = m.planned_datetime, m.planned_end
+        o_start = m.planned_datetime
+        # The on-site wait is FREE time (a gap), so an order only «occupies» the
+        # driver while DRIVING — its busy window ends when the drive ends.
+        o_end = driving_end(m.planned_datetime, m.planned_end, m.service_time)
         if o_start is None or o_end is None:
             continue
         if lo < o_end and o_start < hi:  # half-open interval overlap
             return m
     return None
+
+
+def driving_end(start, end, service_minutes):
+    """The end of an order's *driving* window: ``planned_end`` minus the on-site
+    service time. The on-site wait is free time the driver can fill with a gap
+    order, so it must not count as «busy». Falls back to the full ``end``."""
+    if start is None or end is None:
+        return end
+    if not service_minutes:
+        return end
+    drive_end = end - timedelta(minutes=int(service_minutes))
+    return drive_end if drive_end > start else end
 
 
 def travel_buffer() -> timedelta:

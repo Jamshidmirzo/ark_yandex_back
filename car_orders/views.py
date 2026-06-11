@@ -280,8 +280,9 @@ class ClaimCheckView(APIView):
         # No saved window → nothing to schedule against; allow.
         if not meta or not meta.planned_datetime or not meta.estimated_duration:
             return Response({"ok": True, "conflict": None})
+        new_end = scheduling.driving_end(meta.planned_datetime, meta.planned_end, meta.service_time)
         conflict = scheduling.meta_conflict(
-            driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+            driver_id, meta.planned_datetime, new_end, exclude_order_id=int(pk)
         )
         if conflict is None:
             return Response({"ok": True, "conflict": None})
@@ -378,23 +379,27 @@ class OverlayClaimView(APIView):
                 return _bad_request(
                     "ALREADY_CLAIMED", _("This order is already taken by another driver.")
                 )
-            # Window conflict check against the driver's other committed overlay orders.
+            # Window conflict check against the driver's other committed overlay
+            # orders — a WARNING, not a block. Gap-filling is the whole point: a
+            # driver idle during a long shoot should be able to take another order.
+            # We still surface the overlap so the dispatcher/driver can judge it
+            # (and at_risk flags a return that won't make it). Only a HARD block
+            # remains: an order already taken by a DIFFERENT driver (above).
+            warn_conflict = None
             if meta and meta.planned_datetime and meta.estimated_duration:
+                new_end = scheduling.driving_end(
+                    meta.planned_datetime, meta.planned_end, meta.service_time
+                )
                 conflict = scheduling.meta_conflict(
-                    driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+                    driver_id, meta.planned_datetime, new_end, exclude_order_id=int(pk)
                 )
                 if conflict is not None:
-                    return Response(
-                        {
-                            "ok": False,
-                            "conflict": {
-                                "order_id": conflict.order_id,
-                                "planned_start": conflict.planned_datetime,
-                                "planned_end": conflict.planned_end,
-                                "address": f"Заказ #{conflict.order_id}",
-                            },
-                        }
-                    )
+                    warn_conflict = {
+                        "order_id": conflict.order_id,
+                        "planned_start": conflict.planned_datetime,
+                        "planned_end": conflict.planned_end,
+                        "address": f"Заказ #{conflict.order_id}",
+                    }
             # Don't rewind an in-progress trip on a double-tap; only (re)start from a
             # fresh/terminal state.
             meta, _created = OrderMeta.objects.update_or_create(
@@ -411,7 +416,9 @@ class OverlayClaimView(APIView):
                 meta.returning = False  # start the trip from the first leg again
                 meta.save(update_fields=["trip_state", "returning"])
         notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
-        return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
+        return Response(
+            {"ok": True, "conflict": warn_conflict, "meta": OrderMetaSerializer(meta).data}
+        )
 
 
 class TripStateView(APIView):
