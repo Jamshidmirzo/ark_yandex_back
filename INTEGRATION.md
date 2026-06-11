@@ -315,3 +315,15 @@ driver→pickup, `in_trip` = pickup→destination, and the **return leg**
 destination→return point while `returning`. Do **not** pass `--loop` (it re-drives
 a finished leg from the start). The older `simulate_driver` (§6) targets the
 standalone scheduler.
+
+To test the **nearest-driver suggestion / auto-dispatch** (§7.5) without a phone,
+fake the idle-driver GPS — the per-driver heartbeat that a free driver would send:
+
+```bash
+python manage.py seed_driver_positions --drivers 671,13 --loop   # scatter + drift
+```
+
+It writes `DriverPosition` rows (and keeps `last_seen` fresh), so free drivers get
+a position the dispatcher can rank by distance. A driver still only appears as a
+candidate if demo lists them **on shift with a car of the order's type** (see the
+«Водители» page) — this command only supplies the position.
