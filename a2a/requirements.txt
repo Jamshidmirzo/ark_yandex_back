@@ -1,0 +1,4 @@
+# A2A backend agent server deps. Install into a SEPARATE venv from the Django
+# app (a2a-sdk pulls its own Starlette/uvicorn and shouldn't clash with daphne).
+a2a-sdk[http-server]>=0.3.26,<0.4.0
+uvicorn[standard]>=0.30

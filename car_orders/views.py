@@ -118,25 +118,6 @@ def _time_conflict(order):
     )
 
 
-def _overlap_conflict(detail):
-    """409 used when a dispatcher/auto assignment would put an order on a driver
-    whose DRIVING window overlaps one they already hold. A driver self-claim never
-    hits this (it stays soft — gap-filling); a dispatcher may force past it."""
-    return Response(
-        {
-            "error": {
-                "code": "OVERLAP_CONFLICT",
-                "message": _(
-                    "This window overlaps another of the driver's orders. "
-                    "A dispatcher may force-assign."
-                ),
-                "details": detail,
-            }
-        },
-        status=status.HTTP_409_CONFLICT,
-    )
-
-
 def _reset_driver_shift(driver):
     """Put a driver's active shift back to ONLINE (e.g. after their trip is
     cancelled / reassigned out from under them)."""
@@ -403,38 +384,24 @@ class OverlayClaimView(APIView):
                 return _bad_request(
                     "ALREADY_CLAIMED", _("This order is already taken by another driver.")
                 )
-            # Window conflict check against the driver's other committed overlay
-            # orders. The policy is asymmetric ON PURPOSE:
-            #   • Driver SELF-claim (enforce unset) → SOFT warning, never blocked.
-            #     Gap-filling is the product's point: a driver idle during a long
-            #     shoot should be able to take another order. (Locked decision —
-            #     see carorders-scheduling-spec; hard-blocking here was rejected.)
-            #   • Dispatcher / AUTO assignment (enforce=true) → HARD 409 on a real
-            #     DRIVING overlap, so the system can't silently pile overlapping
-            #     orders onto one driver. The dispatcher may still force=true.
-            # Parked states (at_destination/waiting) are already excluded by
-            # meta_conflict, so genuine gap-fills never trip this. The only other
-            # hard block is an order already held by a DIFFERENT driver (above).
-            enforce = bool(request.data.get("enforce"))
-            force = bool(request.data.get("force"))
-            warn_conflict = None
-            if meta and meta.planned_datetime and meta.estimated_duration:
-                new_end = scheduling.driving_end(
-                    meta.planned_datetime, meta.planned_end, meta.service_time
+            # ONE order at a time: a driver may hold only a SINGLE active
+            # (non-terminal) order — product rule «1 водитель = 1 активный заказ».
+            # Re-claiming the SAME order is fine (idempotent double-tap). Applies to
+            # EVERY path (dispatcher, auto, driver self-claim) and matches the demo
+            # backend, which already forbids a 2nd active order per driver. The
+            # driver becomes available again as soon as the order is completed.
+            busy = (
+                OrderMeta.objects.filter(driver_id=driver_id)
+                .exclude(trip_state__in=terminal)
+                .exclude(order_id=int(pk))
+                .first()
+            )
+            if busy:
+                return _bad_request(
+                    "DRIVER_BUSY",
+                    _("This driver already has an active order (#%(id)s). Finish it first.")
+                    % {"id": busy.order_id},
                 )
-                conflict = scheduling.meta_conflict(
-                    driver_id, meta.planned_datetime, new_end, exclude_order_id=int(pk)
-                )
-                if conflict is not None:
-                    warn_conflict = {
-                        "order_id": conflict.order_id,
-                        "planned_start": conflict.planned_datetime,
-                        "planned_end": conflict.planned_end,
-                        "address": f"Заказ #{conflict.order_id}",
-                    }
-                    if enforce and not force:
-                        # Block (no write yet) — the atomic txn just exits clean.
-                        return _overlap_conflict(warn_conflict)
             # Don't rewind an in-progress trip on a double-tap; only (re)start from a
             # fresh/terminal state.
             meta, _created = OrderMeta.objects.update_or_create(
@@ -451,9 +418,7 @@ class OverlayClaimView(APIView):
                 meta.returning = False  # start the trip from the first leg again
                 meta.save(update_fields=["trip_state", "returning"])
         notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
-        return Response(
-            {"ok": True, "conflict": warn_conflict, "meta": OrderMetaSerializer(meta).data}
-        )
+        return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
 class TripStateView(APIView):
