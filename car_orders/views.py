@@ -118,6 +118,25 @@ def _time_conflict(order):
     )
 
 
+def _overlap_conflict(detail):
+    """409 used when a dispatcher/auto assignment would put an order on a driver
+    whose DRIVING window overlaps one they already hold. A driver self-claim never
+    hits this (it stays soft — gap-filling); a dispatcher may force past it."""
+    return Response(
+        {
+            "error": {
+                "code": "OVERLAP_CONFLICT",
+                "message": _(
+                    "This window overlaps another of the driver's orders. "
+                    "A dispatcher may force-assign."
+                ),
+                "details": detail,
+            }
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 def _reset_driver_shift(driver):
     """Put a driver's active shift back to ONLINE (e.g. after their trip is
     cancelled / reassigned out from under them)."""
@@ -332,8 +351,11 @@ class ClaimCheckBatchView(APIView):
             if meta is None or not meta.planned_datetime or not meta.estimated_duration:
                 results.append({"order_id": oid, "ok": True, "conflict": None})
                 continue
+            new_end = scheduling.driving_end(
+                meta.planned_datetime, meta.planned_end, meta.service_time
+            )
             conflict = scheduling.meta_conflict(
-                driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(oid)
+                driver_id, meta.planned_datetime, new_end, exclude_order_id=int(oid)
             )
             results.append(
                 {
@@ -382,11 +404,19 @@ class OverlayClaimView(APIView):
                     "ALREADY_CLAIMED", _("This order is already taken by another driver.")
                 )
             # Window conflict check against the driver's other committed overlay
-            # orders — a WARNING, not a block. Gap-filling is the whole point: a
-            # driver idle during a long shoot should be able to take another order.
-            # We still surface the overlap so the dispatcher/driver can judge it
-            # (and at_risk flags a return that won't make it). Only a HARD block
-            # remains: an order already taken by a DIFFERENT driver (above).
+            # orders. The policy is asymmetric ON PURPOSE:
+            #   • Driver SELF-claim (enforce unset) → SOFT warning, never blocked.
+            #     Gap-filling is the product's point: a driver idle during a long
+            #     shoot should be able to take another order. (Locked decision —
+            #     see carorders-scheduling-spec; hard-blocking here was rejected.)
+            #   • Dispatcher / AUTO assignment (enforce=true) → HARD 409 on a real
+            #     DRIVING overlap, so the system can't silently pile overlapping
+            #     orders onto one driver. The dispatcher may still force=true.
+            # Parked states (at_destination/waiting) are already excluded by
+            # meta_conflict, so genuine gap-fills never trip this. The only other
+            # hard block is an order already held by a DIFFERENT driver (above).
+            enforce = bool(request.data.get("enforce"))
+            force = bool(request.data.get("force"))
             warn_conflict = None
             if meta and meta.planned_datetime and meta.estimated_duration:
                 new_end = scheduling.driving_end(
@@ -402,6 +432,9 @@ class OverlayClaimView(APIView):
                         "planned_end": conflict.planned_end,
                         "address": f"Заказ #{conflict.order_id}",
                     }
+                    if enforce and not force:
+                        # Block (no write yet) — the atomic txn just exits clean.
+                        return _overlap_conflict(warn_conflict)
             # Don't rewind an in-progress trip on a double-tap; only (re)start from a
             # fresh/terminal state.
             meta, _created = OrderMeta.objects.update_or_create(
@@ -536,8 +569,11 @@ class ExtendView(APIView):
         meta.save()
         conflict = None
         if meta.driver_id and meta.planned_datetime:
+            new_end = scheduling.driving_end(
+                meta.planned_datetime, meta.planned_end, meta.service_time
+            )
             conflict = scheduling.meta_conflict(
-                meta.driver_id, meta.planned_datetime, meta.planned_end, exclude_order_id=int(pk)
+                meta.driver_id, meta.planned_datetime, new_end, exclude_order_id=int(pk)
             )
         return Response(
             {
