@@ -10,10 +10,7 @@ from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
-# Headers we must NOT forward upstream (let requests/host set them).
 _SKIP_REQUEST_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
-# Upstream response headers we must NOT copy back (CORS is added by our
-# middleware; hop-by-hop/encoding headers would corrupt the response).
 _SKIP_RESPONSE_HEADERS = {
     "content-encoding",
     "transfer-encoding",

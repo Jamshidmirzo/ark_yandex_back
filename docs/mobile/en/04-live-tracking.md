@@ -1,7 +1,14 @@
 # 04 — Live tracking: driver position (REST + WebSocket)
 
-The driver position and route are stored in our layer by order id. Two ways to receive them:
-**WebSocket** (recommended — real-time push) and **REST** (fallback / one-shot).
+**Two directions — different transport (important for mobile):**
+- **Uplink (phone → server): HTTP.** The driver app **sends** its position with a plain
+  `POST /drivers/me/location/` (§4.2). No WebSocket for sending — HTTP survives backgrounding (the OS
+  suspends sockets) and is easy to queue offline.
+- **Downlink (server → dispatcher/requester): WebSocket.** On each HTTP heartbeat the server **fans
+  out** the position in real time to whoever is watching the map (§4.1).
+
+So the phone only **posts** GPS; the live map is rendered by the server over WS. Position/route are
+stored in our layer by order id.
 
 ## 4.1 WebSocket (recommended)
 
@@ -67,16 +74,31 @@ ch.stream.listen((raw) {
 ```
 Poll every 3 s if you don’t use the WebSocket.
 
-### Send position (driver app) — RECOMMENDED
-`POST /car-orders/drivers/me/location/`
+### Send position (driver app) — the MAIN way
+`POST /car-orders/drivers/me/location/` (with `Authorization: Bearer <token>`)
 ```json
-{ "driver_id": 671, "lat": 41.331, "lng": 69.255 }
+{ "lat": 41.331, "lng": 69.255 }
 ```
-- The **driver** app posts its GPS here every ~10 s — **one endpoint, no need to know the order id**.
-- The server finds the driver's **current active order** (stage `to_client`/`in_trip`) and attaches the
-  position to it, then fans it out over WebSocket.
-- Response: `{ "updated_orders": [88] }` — which orders it applied to (usually one). If the driver
-  isn't driving anything right now, you get `{ "updated_orders": [] }`.
+- The **driver** app posts its GPS periodically (~every 5–10 s) — **one endpoint, no need to know the
+  order id**. The driver comes from the token (`driver_id` in the body is only a dev fallback).
+- On each heartbeat the server does **two things**:
+  1. stores a **per-driver position** (`DriverPosition`) — used by the dispatcher to find the
+     **nearest free** driver. So send GPS **even while the driver is just on shift with no active
+     order** — otherwise they won't appear in «Рекомендуем».
+  2. if the driver has a **moving** order (stage `to_client`/`in_trip`), attaches the position to it
+     (`OrderLiveLocation`) and fans it out over WebSocket (downlink).
+- Response: `{ "updated_orders": [88] }` — which orders it applied to (usually one). If nothing is
+  being driven → `{ "updated_orders": [] }` (the per-driver position is still saved).
+
+**Background & offline (mobile guidance):**
+- On shift, start background location (native background-location / `watchPosition`), ~5–10 s or by
+  significant change. Stop when off shift.
+- No network (tunnel, dead zone) → **queue the POSTs** and flush when connectivity returns. This is
+  exactly why the uplink is HTTP, not a socket.
+
+> **Reading fleet positions (for the dispatcher client, not the driver):**
+> `GET /car-orders/drivers/positions/?max_age=180` → `{ "671": {lat,lng,last_seen}, ... }` — the
+> latest position per driver (for nearest-driver matching). `max_age` (seconds) drops stale fixes.
 
 ### Send position to a specific order (alternative)
 `POST /car-orders/{id}/live-location/`

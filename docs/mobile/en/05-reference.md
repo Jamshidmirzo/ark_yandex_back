@@ -85,7 +85,8 @@ stay reachable; `reassign` is dispatcher-only (`car_order:approve`).
 | POST | `/car-orders/{id}/trip-state/` `{trip_state}` | local | [03](03-scheduling-overlay.md) |
 | POST | `/car-orders/{id}/extend/` `{minutes}` · `/reassign/` | local | [03](03-scheduling-overlay.md) §3.9 |
 | GET·POST | `/car-orders/{id}/live-location/` | local | [04](04-live-tracking.md) |
-| POST | `/car-orders/drivers/me/location/` `{driver_id,lat,lng}` | local | [04](04-live-tracking.md) |
+| POST | `/car-orders/drivers/me/location/` `{lat,lng}` — driver GPS heartbeat (uplink) | local | [04](04-live-tracking.md) |
+| GET | `/car-orders/drivers/positions/?max_age=180` — fleet positions for nearest-driver matching | local | [04](04-live-tracking.md) |
 | GET | `/car-orders/drivers/me/overlay-orders/?driver_id=X` | local | [03](03-scheduling-overlay.md) |
 | GET | `/health/` · `/healthcheck/` (server-reachability probe for mobile) | local | [README](README.md) |
 | WS | `/ws/car-orders/{id}/location/` | local | [04](04-live-tracking.md) |
