@@ -30,6 +30,7 @@ from car_orders.models import (
     CarType,
     DriverPosition,
     DriverShift,
+    DriverShiftState,
     OrderLiveLocation,
     OrderMeta,
     VehicleReport,
@@ -619,6 +620,77 @@ class DriverLocationView(APIView):
                 meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()}
             )
         return Response({"updated_orders": updated})
+
+
+class DriverShiftView(APIView):
+    """Local OVERLAY «driver on shift» (Р1) — demo has no set-shift endpoint, so we
+    keep it locally by demo driver id. GET current shift / PATCH go on shift (pick a
+    car) / DELETE end. Mounted at /drivers/me/shift/ BEFORE the gateway catch-all."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
+        s = DriverShiftState.objects.filter(driver_id=driver_id).first() if driver_id else None
+        return Response(s.as_shift() if s else None)
+
+    def patch(self, request):
+        driver_id = acting_driver_id(request, request.data.get("driver_id"))
+        car_id = request.data.get("car_id")
+        if driver_id is None or car_id is None:
+            return _bad_request("VALIDATION", _("driver and car_id are required."))
+
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        s, _created = DriverShiftState.objects.update_or_create(
+            driver_id=driver_id,
+            defaults={
+                "car_id": _int(car_id),
+                "car_model": request.data.get("car_model", ""),
+                "car_plate": request.data.get("car_plate", ""),
+                "car_type_id": _int(request.data.get("car_type_id")),
+                "car_type_name": request.data.get("car_type_name", ""),
+                "status": "online",
+            },
+        )
+        return Response(s.as_shift())
+
+    def delete(self, request):
+        driver_id = acting_driver_id(
+            request, request.data.get("driver_id") or request.query_params.get("driver_id")
+        )
+        if driver_id is not None:
+            DriverShiftState.objects.filter(driver_id=driver_id).delete()
+        return Response(None)
+
+
+class DriverShiftsView(APIView):
+    """All active overlay shifts → `{ "671": {car_id, car_type_id, car_model, …} }`.
+    The dispatcher merges this into the driver roster so an on-shift driver becomes a
+    candidate with the right car type."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                str(s.driver_id): {
+                    "car_id": s.car_id,
+                    "car_model": s.car_model,
+                    "car_plate": s.car_plate,
+                    "car_type_id": s.car_type_id,
+                    "car_type_name": s.car_type_name,
+                    "status": s.status,
+                }
+                for s in DriverShiftState.objects.all()
+            }
+        )
 
 
 class DriverPositionsView(APIView):

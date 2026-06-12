@@ -380,6 +380,42 @@ class DriverPosition(models.Model):
         return f"DriverPosition driver={self.driver_id} ({self.lat}, {self.lng})"
 
 
+class DriverShiftState(models.Model):
+    """Local OVERLAY for «driver on shift» (Р1), keyed by the demo driver id —
+    because the demo backend doesn't expose a set-shift endpoint. A driver goes
+    online by picking one of their (demo) cars; this records which car + its type,
+    so the dispatcher's nearest-driver match knows who's on shift with what.
+    Active shift = a row that exists (ended → row deleted)."""
+
+    driver_id = models.PositiveIntegerField(unique=True, db_index=True, verbose_name=_("Driver id"))
+    car_id = models.PositiveIntegerField(verbose_name=_("Car id"))
+    car_model = models.CharField(max_length=255, blank=True)
+    car_plate = models.CharField(max_length=64, blank=True)
+    car_type_id = models.PositiveIntegerField(null=True, blank=True)
+    car_type_name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=20, default="online")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("Driver shift (overlay)")
+        verbose_name_plural = _("Driver shifts (overlay)")
+
+    def as_shift(self):
+        """Shape the frontend's ShiftControl + driver ranking expect."""
+        return {
+            "id": self.driver_id,
+            "status": self.status,
+            "ended_at": None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "car": {
+                "id": self.car_id,
+                "model": self.car_model,
+                "plate_number": self.car_plate,
+                "type": {"id": self.car_type_id, "name": self.car_type_name},
+            },
+        }
+
+
 class OrderMeta(TimestampMixin):
     """Local feature overlay for an order that lives in the demo backend.
 

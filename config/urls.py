@@ -13,6 +13,8 @@ from car_orders.views import (
     ClaimCheckView,
     DriverLocationView,
     DriverPositionsView,
+    DriverShiftView,
+    DriverShiftsView,
     EstimateView,
     ExtendView,
     FleetLiveView,
@@ -48,6 +50,16 @@ urlpatterns = [
         "api/v1/car-orders/drivers/positions/",
         DriverPositionsView.as_view(),
         name="car-order-driver-positions",
+    ),
+    path(
+        "api/v1/car-orders/drivers/me/shift/",
+        DriverShiftView.as_view(),
+        name="car-order-driver-shift",
+    ),
+    path(
+        "api/v1/car-orders/drivers/shifts/",
+        DriverShiftsView.as_view(),
+        name="car-order-driver-shifts",
     ),
     path(
         "api/v1/car-orders/<int:pk>/live-location/",
