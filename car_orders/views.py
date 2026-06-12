@@ -672,6 +672,12 @@ class DriverShiftView(APIView):
         return Response(s.as_shift() if s else None)
 
     def patch(self, request):
+        """Go on shift OR swap the shift car. Swapping (an existing shift, a
+        different car) is the «drove to the garage, changed the car, back on the
+        line» flow — but it is BLOCKED while the driver still has ANY active
+        (non-terminal) order: let them finish (or hand off) their work first, then
+        change cars. This avoids splitting a half-done schedule across two
+        vehicles. Re-selecting the SAME car isn't a change, so it's never blocked."""
         driver_id = acting_driver_id(request, request.data.get("driver_id"))
         car_id = request.data.get("car_id")
         if driver_id is None or car_id is None:
@@ -683,10 +689,28 @@ class DriverShiftView(APIView):
             except (TypeError, ValueError):
                 return None
 
+        new_car_id = _int(car_id)
+        existing = DriverShiftState.objects.filter(driver_id=driver_id).first()
+        changing = existing is not None and existing.car_id != new_car_id
+
+        if changing:
+            terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+            active = (
+                OrderMeta.objects.filter(driver_id=driver_id)
+                .exclude(trip_state__in=terminal)
+                .count()
+            )
+            if active:
+                return _bad_request(
+                    "HAS_ACTIVE_ORDERS",
+                    _("Finish your %(n)s active order(s) before changing cars.")
+                    % {"n": active},
+                )
+
         s, _created = DriverShiftState.objects.update_or_create(
             driver_id=driver_id,
             defaults={
-                "car_id": _int(car_id),
+                "car_id": new_car_id,
                 "car_model": request.data.get("car_model", ""),
                 "car_plate": request.data.get("car_plate", ""),
                 "car_type_id": _int(request.data.get("car_type_id")),
