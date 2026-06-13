@@ -64,6 +64,9 @@ MIDDLEWARE = [
     # Normalise the mobile app's /<lang>/api/v1/... scheme to /api/v1/... so it
     # resolves like the web frontend (must run before URL resolution).
     "config.middleware.MobileLanguagePrefixMiddleware",
+    # Logs every api/health request with its source (📱 phone / 🖥 local) — see
+    # the whole mobile conversation in one stream. Gated by LOG_TRACKING.
+    "config.middleware.RequestLogMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
