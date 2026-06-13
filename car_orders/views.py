@@ -587,8 +587,8 @@ class ReassignView(APIView):
 
 class DriverLocationView(APIView):
     """The driver app posts its GPS ONCE here; the server attaches it to the
-    driver's currently-moving order(s) (to_client / in_trip) and fans it out over
-    WebSocket — so the mobile app doesn't need to know which order id to send to.
+    driver's ACTIVE order and fans it out over WebSocket — so the mobile app
+    doesn't need to know which order id to send to (it just streams its position).
     Body: ``{driver_id, lat, lng}`` → ``{updated_orders: [...]}``."""
 
     authentication_classes = [DemoTokenAuthentication]
@@ -608,8 +608,13 @@ class DriverLocationView(APIView):
             DriverPosition.objects.update_or_create(
                 driver_id=driver_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
             )
-        moving = (OrderMeta.TripState.TO_CLIENT, OrderMeta.TripState.IN_TRIP)
-        metas = OrderMeta.objects.filter(driver_id=driver_id, trip_state__in=moving)
+        # Attach to the driver's ACTIVE (non-terminal) order — NOT only the
+        # moving stages. With «1 водитель = 1 активный заказ» that's exactly their
+        # current order, so the live phone GPS drives the map in every stage
+        # (assigned / en route / parked) — no simulator needed. Geometry is left to
+        # the route the order already carries.
+        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+        metas = OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal)
         updated = []
         for meta in metas:
             OrderLiveLocation.objects.update_or_create(
