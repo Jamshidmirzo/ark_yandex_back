@@ -151,8 +151,20 @@ class NotificationConsumer(AsyncJsonWebsocketConsumer):
         await self.send_json(event["data"])
 
 
+class FallbackConsumer(AsyncJsonWebsocketConsumer):
+    """Cleanly close any WS path we don't serve. The host app opens its own
+    sockets (e.g. /ws/board/, /ws/bus/) that live on the demo backend and are NOT
+    proxied here — without this they raise «No route found» with a noisy traceback
+    on every (re)connect. We just close so the log stays clean."""
+
+    async def connect(self):
+        await self.close()
+
+
 websocket_urlpatterns = [
     re_path(r"^ws/car-orders/fleet/$", FleetConsumer.as_asgi()),
     re_path(r"^ws/notifications/(?P<user_id>\d+)/$", NotificationConsumer.as_asgi()),
     re_path(r"^ws/car-orders/(?P<order_id>\d+)/location/$", LiveLocationConsumer.as_asgi()),
+    # Catch-all LAST: unknown WS paths close quietly instead of raising a traceback.
+    re_path(r".*", FallbackConsumer.as_asgi()),
 ]
