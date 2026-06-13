@@ -185,8 +185,15 @@ def order_leg(meta, driver_pos=None):
     if ts == TS.AT_CLIENT:
         return (o, d)
     if ts in (TS.ASSIGNED, TS.TO_CLIENT):
-        start = driver_pos if (driver_pos and driver_pos[0] is not None) else o
-        return (start, o)
+        # Approach = driver's CURRENT position → pickup. Without a fresh fix we
+        # don't know where they are, so skip (no fake origin→origin line that
+        # looks like the driver is already at the client). The GPS heartbeat
+        # re-pushes the approach once a real position lands.
+        if not driver_pos or driver_pos[0] is None:
+            return None
+        if abs(driver_pos[0] - o[0]) < 1e-6 and abs(driver_pos[1] - o[1]) < 1e-6:
+            return None  # already on the pickup point → no line
+        return (driver_pos, o)
     return None  # waiting → parked, no moving route
 
 

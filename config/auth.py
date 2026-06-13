@@ -58,12 +58,15 @@ def _extract_perms(data):
 
 class DemoTokenAuthentication(authentication.BaseAuthentication):
     """Validate a demo bearer token via demo ``/auth/me/``. Lenient: returns
-    ``None`` (anonymous) when disabled, when no token, or when validation fails —
-    it never raises, so the permission layer alone decides access."""
+    ``None`` (anonymous) when there's no token or validation fails — it never
+    raises, so the permission layer alone decides access.
+
+    A present token is ALWAYS validated (so the driver is identified by their
+    token even in open dev mode — the real mobile sends no body driver_id);
+    ``REQUIRE_OVERLAY_AUTH`` only controls whether ANONYMOUS is rejected
+    (``OverlayAuthenticated``), not whether a token is honored."""
 
     def authenticate(self, request):
-        if not getattr(settings, "REQUIRE_OVERLAY_AUTH", False):
-            return None  # disabled → no-op, no demo call
         header = request.headers.get("Authorization", "")
         if not header.lower().startswith("bearer "):
             return None

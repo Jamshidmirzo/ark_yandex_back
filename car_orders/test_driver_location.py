@@ -49,3 +49,16 @@ def test_free_driver_heartbeat_just_stores_position():
     assert r.status_code == 200, r.content
     assert r.data["updated_orders"] == []
     assert DriverPosition.objects.get(driver_id=7).lat == 41.5
+
+
+@pytest.mark.django_db
+def test_heartbeat_without_driver_id_does_not_smear():
+    # An unidentified heartbeat (no token, no body driver_id) must NOT attach to
+    # driverless orders (the old filter(driver_id=None) smeared GPS onto all of them).
+    OrderMeta.objects.create(order_id=200, driver_id=None, trip_state=OrderMeta.TripState.ASSIGNED)
+    r = APIClient().post(
+        "/api/v1/car-orders/drivers/me/location/", {"lat": 41.3, "lng": 69.2}, format="json"
+    )
+    assert r.status_code == 200, r.content
+    assert r.data["updated_orders"] == []
+    assert not OrderLiveLocation.objects.filter(order_id=200).exists()

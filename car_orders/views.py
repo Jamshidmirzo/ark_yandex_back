@@ -620,19 +620,41 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
     (assigned / en route / parked). Shared by the single + batch location endpoints.
     Returns the order ids whose live position was updated."""
     now = timezone.now()
-    if driver_id is not None:
-        DriverPosition.objects.update_or_create(
-            driver_id=driver_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
-        )
+    # Never attach to driver_id=None — a None filter matches EVERY driverless order
+    # and smears one phone's GPS across all of them. The caller must identify the
+    # driver (token or body driver_id).
+    if driver_id is None:
+        _log_tracking(f"📍 GPS [{src}] БЕЗ driver_id — пропущено (телефон не опознан)")
+        return []
+    DriverPosition.objects.update_or_create(
+        driver_id=driver_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
+    )
     terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
     metas = list(OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal))
+    approach = (OrderMeta.TripState.ASSIGNED, OrderMeta.TripState.TO_CLIENT)
     updated = []
     for meta in metas:
-        OrderLiveLocation.objects.update_or_create(
+        loc, _ = OrderLiveLocation.objects.update_or_create(
             order_id=meta.order_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
         )
         updated.append(meta.order_id)
         broadcast_location(meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()})
+        # «К клиенту»: (re)compute the approach route from the LIVE fix while heading
+        # to the pickup — so the line appears on the first GPS and tracks the driver.
+        # Throttled: only when there's no route yet, or the driver moved >200 m since
+        # the last one, to spare OSRM.
+        if meta.trip_state in approach:
+            from car_orders import dispatch
+
+            far = True
+            if loc.geometry:
+                try:
+                    g0 = loc.geometry[0]  # [lng, lat]
+                    far = dispatch._haversine_km((lat, lng), (g0[1], g0[0])) > 0.2
+                except (TypeError, IndexError, KeyError):
+                    far = True
+            if far:
+                dispatch.push_order_route(meta, driver_pos=(lat, lng))
     _log_tracking(
         f"📍 GPS [{src}] driver={driver_id} ({lat:.5f},{lng:.5f}) → "
         + (

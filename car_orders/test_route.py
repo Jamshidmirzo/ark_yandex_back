@@ -29,9 +29,12 @@ def test_leg_approach_uses_driver_position_when_to_client():
 
 
 @pytest.mark.django_db
-def test_leg_approach_falls_back_to_pickup_without_position():
+def test_leg_approach_skipped_without_position():
+    # No fresh fix → no degenerate origin→origin line; the heartbeat re-pushes later.
     m = _order(TS.ASSIGNED)
-    assert dispatch.order_leg(m, driver_pos=None) == ((41.31, 69.24), (41.31, 69.24))
+    assert dispatch.order_leg(m, driver_pos=None) is None
+    # On the pickup point exactly → also no line.
+    assert dispatch.order_leg(m, driver_pos=(41.31, 69.24)) is None
 
 
 @pytest.mark.django_db
