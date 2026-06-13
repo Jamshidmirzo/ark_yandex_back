@@ -71,38 +71,44 @@ class DemoTokenAuthentication(authentication.BaseAuthentication):
         if not header.lower().startswith("bearer "):
             return None
         token = header[7:].strip()
-        if not token:
-            return None
-
-        cached = _CACHE.get(token)
-        if cached and cached[0] > time.monotonic():
-            return (cached[1], token)
-
-        try:
-            resp = requests.get(
-                _demo_me_url(),
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=8,
-            )
-        except requests.RequestException:
-            return None  # demo unreachable → anonymous (whole app is down anyway)
-        if not resp.ok:
-            return None
-        try:
-            data = resp.json()
-        except ValueError:
-            return None
-        uid = data.get("id")
-        if uid is None:
-            return None
-        user = DemoUser(
-            uid,
-            username=data.get("username", ""),
-            permissions=_extract_perms(data),
-            is_superuser=bool(data.get("is_superuser")),
-        )
-        _CACHE[token] = (time.monotonic() + _TTL, user)
-        return (user, token)
+        user = validate_demo_token(token)
+        return (user, token) if user else None
 
     def authenticate_header(self, request):
         return "Bearer"
+
+
+def validate_demo_token(token):
+    """Return a :class:`DemoUser` for a valid demo bearer token (cached ``_TTL``),
+    else ``None``. Reusable from non-DRF contexts (e.g. the WebSocket GPS uplink),
+    so token→driver identity is computed the same way everywhere."""
+    if not token:
+        return None
+    cached = _CACHE.get(token)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+    try:
+        resp = requests.get(
+            _demo_me_url(),
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=8,
+        )
+    except requests.RequestException:
+        return None  # demo unreachable → anonymous (whole app is down anyway)
+    if not resp.ok:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    uid = data.get("id")
+    if uid is None:
+        return None
+    user = DemoUser(
+        uid,
+        username=data.get("username", ""),
+        permissions=_extract_perms(data),
+        is_superuser=bool(data.get("is_superuser")),
+    )
+    _CACHE[token] = (time.monotonic() + _TTL, user)
+    return user

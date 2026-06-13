@@ -151,6 +151,60 @@ class NotificationConsumer(AsyncJsonWebsocketConsumer):
         await self.send_json(event["data"])
 
 
+class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
+    """The driver app STREAMS its GPS over WebSocket (alternative to the HTTP
+    heartbeat POST /drivers/me/location/). Identify the driver via the query
+    string: ``?token=<demo jwt>`` (validated like the REST auth) or
+    ``?driver_id=<id>`` (dev fallback); both can also be sent in the first JSON
+    message. Each ``{lat, lng}`` message is stored + attached to the driver's
+    active order + broadcast + (re)routed — exactly like the HTTP heartbeat.
+    Connect: ``ws://<host>/ws/drivers/me/location/?driver_id=670`` (or ``?token=``)."""
+
+    async def connect(self):
+        self.driver_id = await self._from_payload(self._query())
+        await self.accept()
+        await self.send_json({"ok": True, "driver_id": self.driver_id})
+
+    async def receive_json(self, content, **kwargs):
+        if self.driver_id is None:  # identity may arrive in the first message
+            self.driver_id = await self._from_payload(content)
+        lat, lng = content.get("lat"), content.get("lng")
+        if self.driver_id is None or lat is None or lng is None:
+            await self.send_json({"error": "need identity (?token / ?driver_id) and lat/lng"})
+            return
+        await self.send_json({"updated_orders": await self._apply(self.driver_id, lat, lng)})
+
+    def _query(self):
+        from urllib.parse import parse_qs
+
+        qs = parse_qs(self.scope.get("query_string", b"").decode())
+        return {"driver_id": qs.get("driver_id", [None])[0], "token": qs.get("token", [None])[0]}
+
+    @database_sync_to_async
+    def _from_payload(self, content):
+        from config.auth import validate_demo_token
+
+        token = content.get("token")
+        if token:
+            user = validate_demo_token(token)
+            if user:
+                return user.id
+        did = content.get("driver_id")
+        try:
+            return int(did) if did is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @database_sync_to_async
+    def _apply(self, driver_id, lat, lng):
+        from car_orders.views import _apply_driver_location
+
+        try:
+            return _apply_driver_location(int(driver_id), float(lat), float(lng), "📡 ws")
+        except (TypeError, ValueError):
+            return []
+
+
 class FallbackConsumer(AsyncJsonWebsocketConsumer):
     """Cleanly close any WS path we don't serve. The host app opens its own
     sockets (e.g. /ws/board/, /ws/bus/) that live on the demo backend and are NOT
@@ -161,10 +215,15 @@ class FallbackConsumer(AsyncJsonWebsocketConsumer):
         await self.close()
 
 
+# Optional leading «/<lang>/» (the mobile uses /ru/... for HTTP and may reuse the
+# habit for WS) — mirror the HTTP MobileLanguagePrefixMiddleware so both schemes route.
+_L = r"^(?:[a-z]{2}/)?"
 websocket_urlpatterns = [
-    re_path(r"^ws/car-orders/fleet/$", FleetConsumer.as_asgi()),
-    re_path(r"^ws/notifications/(?P<user_id>\d+)/$", NotificationConsumer.as_asgi()),
-    re_path(r"^ws/car-orders/(?P<order_id>\d+)/location/$", LiveLocationConsumer.as_asgi()),
+    re_path(_L + r"ws/car-orders/fleet/$", FleetConsumer.as_asgi()),
+    re_path(_L + r"ws/notifications/(?P<user_id>\d+)/$", NotificationConsumer.as_asgi()),
+    re_path(_L + r"ws/car-orders/(?P<order_id>\d+)/location/$", LiveLocationConsumer.as_asgi()),
+    # Driver GPS UPLINK over WS (the phone sends its position here).
+    re_path(_L + r"ws/drivers/me/location/$", DriverLocationConsumer.as_asgi()),
     # Catch-all LAST: unknown WS paths close quietly instead of raising a traceback.
     re_path(r".*", FallbackConsumer.as_asgi()),
 ]
