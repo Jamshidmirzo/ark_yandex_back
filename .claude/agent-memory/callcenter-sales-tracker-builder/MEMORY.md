@@ -1,0 +1,4 @@
+- [Project location & layout](project-location.md) — naffAI lives at /Users/user/Desktop/mp/naffAI as a separate monorepo, not inside ark_yandex
+- [Tech choices](tech-choices.md) — locked stack and defaults (HackSoft, Decimal money, React SPA, role policy)
+- [Business rule defaults](business-rules.md) — payout %, trainees, returns, gifts, duplicate IMEI override
+- [TAC dataset workflow](tac-dataset.md) — how the local TAC table is seeded and refreshed
