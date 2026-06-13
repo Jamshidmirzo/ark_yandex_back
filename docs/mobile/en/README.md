@@ -9,7 +9,8 @@ Per-section docs for integrating a mobile client (Flutter / Kotlin / Swift) with
 3. [Scheduling & overlay](03-scheduling-overlay.md) — **trip stages** (how to start and run them), claiming an order, auto-computed route/duration, “one active order per driver”, auto-dispatch.
 4. [Live tracking (REST + WebSocket)](04-live-tracking.md) — real-time driver position & route on the map.
 5. [Reference](05-reference.md) — statuses, trip_state, error format, pagination.
-6. [WebSockets](06-websockets.md) — **all sockets**: the driver GPS socket (send + marker/polyline), the order socket, fleet, notifications.
+6. [WebSockets](06-websockets.md) — **all sockets**: the driver GPS socket, the order socket, fleet, notifications.
+7. [Driver WebSocket](07-driver-websocket.md) — **just for the driver app**: connect, send GPS, receive marker + polyline, Flutter example.
 
 ---
 
