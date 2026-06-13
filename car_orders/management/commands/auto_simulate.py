@@ -78,8 +78,26 @@ class Command(BaseCommand):
             action="store_true",
             help="Demo: re-drive a leg from the start when it finishes (continuous motion).",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Run even though the simulator is disabled (real phones stream GPS now).",
+        )
 
     def handle(self, *args, **opts):
+        from django.conf import settings
+
+        # Disabled by default: real driver phones now POST their position to
+        # /drivers/me/location/, so the fake feed would fight the real one and the
+        # marker would jump. Only run to test tracking WITHOUT a phone.
+        if not getattr(settings, "AUTO_SIMULATE_ENABLED", False) and not opts["force"]:
+            self.stdout.write(
+                self.style.WARNING(
+                    "Simulator is OFF — real phones drive GPS via /drivers/me/location/.\n"
+                    "To test without a phone: set AUTO_SIMULATE_ENABLED=1 or pass --force."
+                )
+            )
+            return
         base = opts["base"].rstrip("/")
         interval = opts["interval"]
         steps = max(2, opts["steps"])

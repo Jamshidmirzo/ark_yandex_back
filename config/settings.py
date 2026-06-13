@@ -179,6 +179,14 @@ UPSTREAM_API_BASE = env(
     default="http://host.docker.internal:12001/ru/api/v1",
 )
 
+# (connect, read) timeout for the upstream proxy, in seconds. Connect is short
+# so a dead/unreachable upstream fails fast (no 30s hang); read is generous so a
+# slow-but-alive endpoint isn't cut off. Override per-env if needed.
+UPSTREAM_TIMEOUT = (
+    env.float("UPSTREAM_CONNECT_TIMEOUT", default=5.0),
+    env.float("UPSTREAM_READ_TIMEOUT", default=120.0),
+)
+
 # Overlay auth bridge. OFF (default) keeps the open dev behaviour; ON validates
 # the demo bearer token via demo /auth/me/ (config.auth.DemoTokenAuthentication)
 # and derives the driver from it instead of the request body. Flip on once login
@@ -207,6 +215,12 @@ AUTO_DISPATCH_LEAD_MIN = env.int("AUTO_DISPATCH_LEAD_MIN", default=45)
 AUTO_DISPATCH_STALE_SEC = env.int("AUTO_DISPATCH_STALE_SEC", default=180)
 # Ignore driver GPS fixes older than this when ranking by distance.
 AUTO_DISPATCH_POS_MAX_AGE = env.int("AUTO_DISPATCH_POS_MAX_AGE", default=180)
+
+# Driver GPS simulator (`manage.py auto_simulate`). OFF by default now that real
+# phones stream their position to /drivers/me/location/ — the fake feed would fight
+# the real one. Set AUTO_SIMULATE_ENABLED=1 (or pass --force) only to test tracking
+# without a phone.
+AUTO_SIMULATE_ENABLED = env.bool("AUTO_SIMULATE_ENABLED", default=False)
 
 
 # CORS — allow the Vite dev frontend (ark_yandex_front) to call the API.
