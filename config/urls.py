@@ -13,6 +13,7 @@ from car_orders.views import (
     ClaimCheckView,
     DriverLocationView,
     DriverPositionsView,
+    LocationBatchView,
     DriverShiftView,
     DriverShiftsView,
     EstimateView,
@@ -46,6 +47,9 @@ urlpatterns = [
         DriverLocationView.as_view(),
         name="car-order-driver-location",
     ),
+    # The mobile app's batched GPS uploads (offline queue). Top-level path — NOT
+    # under /car-orders/ — to match what the app actually posts. Before gateway.
+    path("api/v1/location/batch/", LocationBatchView.as_view(), name="location-batch"),
     path(
         "api/v1/car-orders/drivers/positions/",
         DriverPositionsView.as_view(),
