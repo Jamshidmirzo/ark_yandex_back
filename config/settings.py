@@ -208,6 +208,13 @@ CAR_ORDER_DEFAULT_SERVICE = timedelta(minutes=env.int("CAR_ORDER_DEFAULT_SERVICE
 # Yandex Router API in production.
 CAR_ORDER_OSRM_URL = env("CAR_ORDER_OSRM_URL", default="https://router.project-osrm.org")
 
+# Arrival geofence (server-side): the driver may mark «at_client» / «at_destination»
+# only within this many metres of the point AND with a fresh GPS fix. 0 disables it
+# (handy for testing without being physically at the point).
+CAR_ORDER_ARRIVAL_GEOFENCE_M = env.int("CAR_ORDER_ARRIVAL_GEOFENCE_M", default=100)
+# A GPS fix older than this (seconds) is too stale to confirm arrival.
+CAR_ORDER_GPS_FRESH_S = env.int("CAR_ORDER_GPS_FRESH_S", default=120)
+
 
 # Backend auto-dispatch worker (`manage.py auto_dispatch`). Assigns awaiting orders
 # to the nearest free driver server-side, so it works with no dispatcher tab open.

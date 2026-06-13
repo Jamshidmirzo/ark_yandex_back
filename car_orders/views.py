@@ -15,6 +15,7 @@ from django.contrib.auth import get_user_model
 from django.db import models, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -90,6 +91,21 @@ def _log_tracking(message):
 
     if getattr(settings, "LOG_TRACKING", False):
         print(message, flush=True)
+
+
+@csrf_exempt
+def admin_approve_overlay(request, pk):
+    """Server hook on demo admin-approve: forward the call to demo and, on success,
+    flip OUR OrderMeta to ``dispatchable=True`` so the auto-dispatcher picks the
+    now-approved order up — regardless of which client approved it. Mounted before
+    the gateway catch-all. (The web form already sets the flag; this guarantees it
+    for any other approve path.)"""
+    from config.gateway import gateway
+
+    resp = gateway(request, f"car-orders/{pk}/admin-approve/")
+    if 200 <= resp.status_code < 300:
+        OrderMeta.objects.update_or_create(order_id=int(pk), defaults={"dispatchable": True})
+    return resp
 
 
 def _clear_live_location(pk):
@@ -443,10 +459,56 @@ class OverlayClaimView(APIView):
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
+_TS = OrderMeta.TripState
+# Allowed forward transitions (same-state re-tap and → cancelled are always ok).
+# at_destination → in_trip is the round-trip RETURN leg; completed only from
+# at_destination/waiting.
+_ALLOWED_TRANSITIONS = {
+    _TS.ASSIGNED: {_TS.TO_CLIENT},
+    _TS.TO_CLIENT: {_TS.AT_CLIENT},
+    _TS.AT_CLIENT: {_TS.IN_TRIP},
+    _TS.IN_TRIP: {_TS.AT_DESTINATION, _TS.WAITING},
+    _TS.AT_DESTINATION: {_TS.IN_TRIP, _TS.WAITING, _TS.COMPLETED},
+    _TS.WAITING: {_TS.IN_TRIP, _TS.COMPLETED},
+}
+
+
+def _check_arrival_geofence(meta, state):
+    """The driver may only mark arrival (at_client / at_destination) within
+    ``CAR_ORDER_ARRIVAL_GEOFENCE_M`` of the point AND with a fresh GPS fix. Returns
+    a 400 Response when too far / no fresh fix, else None. 0-radius disables it."""
+    from django.conf import settings
+
+    from car_orders import dispatch
+
+    radius_m = getattr(settings, "CAR_ORDER_ARRIVAL_GEOFENCE_M", 100)
+    if not radius_m:
+        return None
+    if state == OrderMeta.TripState.AT_CLIENT:
+        tgt = (meta.origin_lat, meta.origin_lng)
+    elif meta.returning and meta.return_lat is not None and meta.return_lng is not None:
+        tgt = (meta.return_lat, meta.return_lng)
+    else:
+        tgt = (meta.address_lat, meta.address_lng)
+    if tgt[0] is None or tgt[1] is None:
+        return None  # no target coords → can't enforce
+    pos = DriverPosition.objects.filter(driver_id=meta.driver_id).first()
+    fresh_s = getattr(settings, "CAR_ORDER_GPS_FRESH_S", 120)
+    if pos is None or (timezone.now() - pos.last_seen).total_seconds() > fresh_s:
+        return _bad_request("NO_FRESH_GPS", _("Need a fresh GPS fix to confirm arrival."))
+    dist_m = dispatch._haversine_km((pos.lat, pos.lng), tgt) * 1000
+    if dist_m > radius_m:
+        return _bad_request(
+            "TOO_FAR", _("Too far from the point (%(m)d m) to mark arrival.") % {"m": int(dist_m)}
+        )
+    return None
+
+
 class TripStateView(APIView):
     """Advance the richer trip state (overlay): to_client / at_client / in_trip /
-    at_destination / waiting / completed. Updates OrderMeta and pushes the change
-    over the order's WebSocket so the client/dispatcher see it live."""
+    at_destination / waiting / completed. Authoritative: only the assigned driver
+    (or a dispatcher) may advance it, transitions must follow the flow, and arrival
+    stages are geofenced. Updates OrderMeta and pushes the change over WebSocket."""
 
     authentication_classes = [DemoTokenAuthentication]
     permission_classes = [OverlayAuthenticated]
@@ -457,12 +519,41 @@ class TripStateView(APIView):
         if state not in valid:
             return _bad_request("VALIDATION", _("Unknown trip_state."))
         existing = OrderMeta.objects.filter(order_id=pk).first()
+        if existing is None:
+            return _bad_request("NOT_FOUND", _("No order to advance."))
+        cur = existing.trip_state
+
+        # Only the ASSIGNED driver (or a dispatcher) may advance the trip.
+        actor = acting_driver_id(request)
         if (
-            existing
-            and existing.trip_state == OrderMeta.TripState.COMPLETED
+            existing.driver_id is not None
+            and actor is not None
+            and str(actor) != str(existing.driver_id)
+            and not OverlayDispatcher().has_permission(request, self)
+        ):
+            return _forbidden(_("Only the assigned driver can change this order's stage."))
+
+        if (
+            existing.trip_state == OrderMeta.TripState.COMPLETED
             and state != OrderMeta.TripState.COMPLETED
         ):
             return _bad_request("INVALID_STATUS", _("This order is already completed."))
+
+        # Transitions must follow the flow (same-state re-tap and → cancelled ok).
+        if state not in (cur, OrderMeta.TripState.CANCELLED):
+            if state not in _ALLOWED_TRANSITIONS.get(cur, set()):
+                return _bad_request(
+                    "INVALID_TRANSITION",
+                    _("Cannot go from %(a)s to %(b)s.") % {"a": cur, "b": state},
+                )
+        # Round trip: can't complete before the return leg is done.
+        if state == OrderMeta.TripState.COMPLETED and existing.has_return and not existing.returning:
+            return _bad_request("INVALID_TRANSITION", _("Drive the return leg before completing."))
+        # Geofence the arrival stages.
+        if state in (OrderMeta.TripState.AT_CLIENT, OrderMeta.TripState.AT_DESTINATION):
+            geo_err = _check_arrival_geofence(existing, state)
+            if geo_err is not None:
+                return geo_err
         # Don't let a driver start DRIVING a 2nd order while already driving one
         # (one car / one place). A parked driver — on hold during a long shoot
         # (waiting / at_destination) — is free to take a gap order, so we only
@@ -523,17 +614,25 @@ class OverlayReleaseView(APIView):
         if meta is None:
             return Response({"ok": True})
         prev_driver = meta.driver_id
+        # `requeue` = the driver returned the order to the queue → keep it alive +
+        # dispatchable (non-terminal) so it's re-assigned. Default (reject / cancel /
+        # done teardown) → terminal CANCELLED.
+        requeue = bool(request.data.get("requeue"))
         meta.overlay_claimed = False
         meta.driver_id = None
         meta.car_id = None
         meta.car_label = ""
-        meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.returning = False
+        if requeue:
+            meta.trip_state = OrderMeta.TripState.ASSIGNED
+            meta.dispatchable = True
+        else:
+            meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.save()
         _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": "cancelled"})
-        # Notify the requester + the driver who was on it.
-        notify_order_status(meta, OrderMeta.TripState.CANCELLED)
+        if not requeue:
+            notify_order_status(meta, OrderMeta.TripState.CANCELLED)  # requester
         _notify_dropped_driver(prev_driver, pk)
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
@@ -599,16 +698,20 @@ class ReassignView(APIView):
         if meta is None:
             return _bad_request("NOT_FOUND", _("Nothing to reassign for this order."))
         prev_driver = meta.driver_id
+        # Back to the QUEUE, not terminal: drop the driver but keep the order
+        # dispatchable + non-terminal so the auto-dispatcher re-assigns it. (Using
+        # CANCELLED here meant the order was never re-dispatched.)
         meta.overlay_claimed = False
         meta.driver_id = None
         meta.car_id = None
         meta.car_label = ""
-        meta.trip_state = OrderMeta.TripState.CANCELLED
         meta.returning = False
+        meta.trip_state = OrderMeta.TripState.ASSIGNED  # non-terminal «awaiting» state
+        meta.dispatchable = True
         meta.save()
         _clear_live_location(pk)
+        # Tell the watchers the current tracking ended; the driver they were on is gone.
         broadcast_location(pk, {"trip_state": "cancelled"})
-        notify_order_status(meta, OrderMeta.TripState.CANCELLED)  # author
         _notify_dropped_driver(prev_driver, pk)  # the driver taken off
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
@@ -716,6 +819,14 @@ class DriverShiftView(APIView):
             except (TypeError, ValueError):
                 return None
 
+        # Car type is REQUIRED — the dispatcher/auto-dispatcher matches orders by
+        # car type, so an on-shift driver without a type is silently un-dispatchable.
+        new_car_type = _int(request.data.get("car_type_id"))
+        if new_car_type is None:
+            return _bad_request(
+                "VALIDATION",
+                _("car_type_id is required to go on shift (orders are matched by car type)."),
+            )
         new_car_id = _int(car_id)
         existing = DriverShiftState.objects.filter(driver_id=driver_id).first()
         changing = existing is not None and existing.car_id != new_car_id
@@ -740,7 +851,7 @@ class DriverShiftView(APIView):
                 "car_id": new_car_id,
                 "car_model": request.data.get("car_model", ""),
                 "car_plate": request.data.get("car_plate", ""),
-                "car_type_id": _int(request.data.get("car_type_id")),
+                "car_type_id": new_car_type,
                 "car_type_name": request.data.get("car_type_name", ""),
                 "status": "online",
             },
@@ -751,8 +862,20 @@ class DriverShiftView(APIView):
         driver_id = acting_driver_id(
             request, request.data.get("driver_id") or request.query_params.get("driver_id")
         )
-        if driver_id is not None:
-            DriverShiftState.objects.filter(driver_id=driver_id).delete()
+        if driver_id is None:
+            return Response(None)
+        # Don't strand an in-flight order: refuse to end the shift while the driver
+        # still has an active (non-terminal) order — finish or hand it off first.
+        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+        active = (
+            OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal).count()
+        )
+        if active:
+            return _bad_request(
+                "HAS_ACTIVE_ORDERS",
+                _("Finish your %(n)s active order(s) before ending the shift.") % {"n": active},
+            )
+        DriverShiftState.objects.filter(driver_id=driver_id).delete()
         return Response(None)
 
 

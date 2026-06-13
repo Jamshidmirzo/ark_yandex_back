@@ -10,11 +10,8 @@ from car_orders.models import DriverShiftState, OrderMeta
 
 
 def _go_online(driver_id, car_id, **car):
-    return APIClient().patch(
-        "/api/v1/car-orders/drivers/me/shift/",
-        {"driver_id": driver_id, "car_id": car_id, **car},
-        format="json",
-    )
+    body = {"driver_id": driver_id, "car_id": car_id, "car_type_id": 1, **car}
+    return APIClient().patch("/api/v1/car-orders/drivers/me/shift/", body, format="json")
 
 
 def _order(driver_id, order_id, state, car_id=10):

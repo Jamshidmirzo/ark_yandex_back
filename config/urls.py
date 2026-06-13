@@ -11,6 +11,7 @@ from django.urls import include, path, re_path
 from car_orders.views import (
     ClaimCheckBatchView,
     ClaimCheckView,
+    admin_approve_overlay,
     DriverLocationView,
     DriverPositionsView,
     DriverShiftView,
@@ -102,6 +103,13 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/reassign/",
         ReassignView.as_view(),
         name="car-order-reassign",
+    ),
+    # Hook on demo admin-approve: proxy to demo + flip OrderMeta.dispatchable so
+    # the auto-dispatcher sees the now-approved order. Before the gateway catch-all.
+    path(
+        "api/v1/car-orders/<int:pk>/admin-approve/",
+        admin_approve_overlay,
+        name="car-order-admin-approve",
     ),
     # Transparent gateway → real DEV backend (demo.ark.glob.uz). Keep last.
     re_path(r"^api/v1/(?P<path>.*)$", gateway, name="gateway"),

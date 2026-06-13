@@ -102,7 +102,9 @@ def test_reassign_frees_the_overlay_claim():
     assert meta.overlay_claimed is False
     assert meta.driver_id is None
     assert meta.car_id is None
-    assert meta.trip_state == OrderMeta.TripState.CANCELLED
+    # Reassign now RE-QUEUES (not terminal) so the order is re-dispatched.
+    assert meta.trip_state == OrderMeta.TripState.ASSIGNED
+    assert meta.dispatchable is True
 
 
 @pytest.mark.django_db
@@ -161,7 +163,11 @@ def test_at_risk_and_is_late_exposed_in_meta():
 @pytest.mark.django_db
 def test_live_location_cleared_on_terminal_trip_state():
     client = APIClient()
-    OrderMeta.objects.create(order_id=610, driver_id=12, trip_state=OrderMeta.TripState.IN_TRIP)
+    # at_destination → completed is the valid terminal step (completed can't be
+    # reached straight from in_trip under the transition rules).
+    OrderMeta.objects.create(
+        order_id=610, driver_id=12, trip_state=OrderMeta.TripState.AT_DESTINATION
+    )
     OrderLiveLocation.objects.create(order_id=610, lat=41.3, lng=69.2, last_seen=timezone.now())
     r = client.post(
         "/api/v1/car-orders/610/trip-state/", {"trip_state": "completed"}, format="json"

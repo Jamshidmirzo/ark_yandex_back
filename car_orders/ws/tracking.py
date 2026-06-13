@@ -31,17 +31,30 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _latest(self):
-        from car_orders.models import OrderLiveLocation
+        """Connect replay: position + route (if any) AND the current stage
+        (trip_state/returning), so the banner is correct after every reconnect —
+        and a terminal order replays its completed/cancelled frame so the client
+        closes cleanly instead of hanging blank."""
+        from car_orders.models import OrderLiveLocation, OrderMeta
 
+        meta = OrderMeta.objects.filter(order_id=self.order_id).first()
         loc = OrderLiveLocation.objects.filter(order_id=self.order_id).first()
-        if not loc:
+        if not meta and not loc:
             return None
-        return {
-            "lat": loc.lat,
-            "lng": loc.lng,
-            "last_seen": loc.last_seen.isoformat(),
-            "geometry": loc.geometry,
-        }
+        out = {}
+        if loc:
+            out.update(
+                {
+                    "lat": loc.lat,
+                    "lng": loc.lng,
+                    "last_seen": loc.last_seen.isoformat(),
+                    "geometry": loc.geometry,
+                }
+            )
+        if meta:
+            out["trip_state"] = meta.trip_state
+            out["returning"] = meta.returning
+        return out or None
 
 
 class FleetConsumer(AsyncJsonWebsocketConsumer):
