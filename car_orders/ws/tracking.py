@@ -43,12 +43,14 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
             return None
         out = {}
         if loc:
+            from car_orders.dispatch import _downsample
+
             out.update(
                 {
                     "lat": loc.lat,
                     "lng": loc.lng,
                     "last_seen": loc.last_seen.isoformat(),
-                    "geometry": loc.geometry,
+                    "geometry": _downsample(loc.geometry),  # bound the WS frame
                 }
             )
         if meta:

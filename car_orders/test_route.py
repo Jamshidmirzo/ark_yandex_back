@@ -82,3 +82,21 @@ def test_push_returns_none_when_parked():
     m = _order(TS.WAITING)
     assert dispatch.push_order_route(m) is None
     assert not OrderLiveLocation.objects.filter(order_id=900).exists()
+
+
+def test_downsample_caps_points():
+    big = [[i, i] for i in range(60000)]
+    out = dispatch._downsample(big)
+    assert len(out) <= dispatch.MAX_GEOM_POINTS + 1
+    assert out[0] == big[0] and out[-1] == big[-1]  # ends kept
+
+
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_push_skips_absurd_leg():
+    # Driver «stuck» in San Francisco, pickup in Tashkent → 11 000 km leg → skip,
+    # no giant polyline stored (this overflowed the 1 MB WS frame).
+    m = _order(TS.TO_CLIENT)  # pickup 41.31,69.24
+    assert dispatch.push_order_route(m, driver_pos=(37.78, -122.40)) is None
+    loc = OrderLiveLocation.objects.filter(order_id=900).first()
+    assert loc is None or not loc.geometry

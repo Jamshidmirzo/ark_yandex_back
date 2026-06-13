@@ -35,6 +35,9 @@ def fleet_live_orders():
         data["lat"] = loc.lat if loc else None
         data["lng"] = loc.lng if loc else None
         data["last_seen"] = loc.last_seen.isoformat() if loc else None
-        data["geometry"] = loc.geometry if loc else None  # route polyline for the map
+        # Downsample so the whole-fleet snapshot stays under the 1 MB WS frame limit.
+        from car_orders.dispatch import _downsample
+
+        data["geometry"] = _downsample(loc.geometry) if loc else None
         out.append(data)
     return out

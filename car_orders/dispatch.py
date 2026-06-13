@@ -23,6 +23,26 @@ from car_orders.models import DriverPosition, DriverShiftState, OrderMeta
 
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
 
+# A leg longer than this is almost certainly stale/bogus GPS (e.g. a San-Francisco
+# fix vs a Tashkent pickup → an 11 000 km route, a 1.4 MB polyline that overflows
+# the 1 MB WebSocket frame). Skip routing it.
+MAX_LEG_KM = 300
+# Cap the polyline so a single order's geometry never blows the WS frame; 500 points
+# is smooth enough for tracking.
+MAX_GEOM_POINTS = 500
+
+
+def _downsample(geom, n=MAX_GEOM_POINTS):
+    """Thin a polyline to at most ``n`` points (keeps the ends), so the WS frame
+    stays small. OSRM ``overview=full`` can return tens of thousands of points."""
+    if not geom or len(geom) <= n:
+        return geom
+    step = len(geom) / float(n)
+    out = [geom[int(i * step)] for i in range(n)]
+    if out[-1] != geom[-1]:
+        out.append(geom[-1])
+    return out
+
 
 def _haversine_km(a, b):
     """Great-circle distance in km between (lat, lng) tuples."""
@@ -210,6 +230,11 @@ def push_order_route(meta, driver_pos=None):
     if not leg:
         return None
     (slat, slng), (elat, elng) = leg
+    # Bogus-data guard: don't route an absurdly long leg (stale GPS far from the
+    # order's region) — it produces a transcontinental polyline that overflows the
+    # WS frame. The heartbeat re-pushes once a sane fix lands.
+    if _haversine_km((slat, slng), (elat, elng)) > MAX_LEG_KM:
+        return None
     from car_orders import services
     from car_orders.models import OrderLiveLocation
     from car_orders.ws import broadcast_location
@@ -220,6 +245,7 @@ def push_order_route(meta, driver_pos=None):
         geom = None
     if not geom:
         return None
+    geom = _downsample(geom)  # keep the WS frame well under the 1 MB limit
     loc, created = OrderLiveLocation.objects.get_or_create(
         order_id=meta.order_id,
         defaults={"lat": slat, "lng": slng, "last_seen": timezone.now(), "geometry": geom},
