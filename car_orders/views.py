@@ -74,9 +74,18 @@ def _bad_request(code, message):
     )
 
 
+def _src(request):
+    """Where a request came from, for the tracking log: ``📱 <ip>`` (a real phone)
+    vs ``🖥 локально`` (our own server / the simulator on 127.0.0.1)."""
+    xff = request.META.get("HTTP_X_FORWARDED_FOR")
+    ip = xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR", "?")
+    return "🖥 локально" if ip in ("127.0.0.1", "::1", "localhost") else f"📱 {ip}"
+
+
 def _log_tracking(message):
     """Console line for GPS heartbeats / trip-state changes — so you can watch in
-    real time what the mobile app sends. Toggle with settings.LOG_TRACKING."""
+    real time what the mobile app sends (and tell it apart from our own/simulator
+    traffic). Toggle with settings.LOG_TRACKING."""
     from django.conf import settings
 
     if getattr(settings, "LOG_TRACKING", False):
@@ -247,6 +256,7 @@ class LiveLocationView(APIView):
         if geometry is not None:  # carry the route on the first push
             data["geometry"] = geometry
         broadcast_location(pk, data)
+        _log_tracking(f"🛰 LIVE [{_src(request)}] #{pk} ({loc.lat:.5f},{loc.lng:.5f})")
         return Response({"lat": loc.lat, "lng": loc.lng, "last_seen": loc.last_seen})
 
 
@@ -487,7 +497,7 @@ class TripStateView(APIView):
             _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": state, "returning": meta.returning})
         notify_order_status(meta, state)  # toast to driver + requester
-        _log_tracking(f"🚦 STATUS #{pk} driver={meta.driver_id} → {state}")
+        _log_tracking(f"🚦 STATUS [{_src(request)}] #{pk} driver={meta.driver_id} → {state}")
         return Response(OrderMetaSerializer(meta).data)
 
 
@@ -636,7 +646,7 @@ class DriverLocationView(APIView):
                 meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()}
             )
         _log_tracking(
-            f"📍 GPS driver={driver_id} ({lat:.5f},{lng:.5f}) → "
+            f"📍 GPS [{_src(request)}] driver={driver_id} ({lat:.5f},{lng:.5f}) → "
             + (
                 ", ".join(f"#{m.order_id} [{m.trip_state}]" for m in metas)
                 if metas
