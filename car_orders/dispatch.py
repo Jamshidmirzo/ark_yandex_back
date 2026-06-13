@@ -198,12 +198,19 @@ def order_leg(meta, driver_pos=None):
         else o
     )
     TS = OrderMeta.TripState
+
+    def _start(fallback):
+        """Moving legs start from the driver's CURRENT position (so a re-route
+        follows the road they actually took), falling back to the leg origin."""
+        return driver_pos if (driver_pos and driver_pos[0] is not None) else fallback
+
     if ts == TS.IN_TRIP:
-        return (d, r) if meta.returning else (o, d)
+        end = r if meta.returning else d
+        return (_start(d if meta.returning else o), end)
     if ts == TS.AT_DESTINATION:
         return (d, r) if (meta.has_return and not meta.returning) else None
     if ts == TS.AT_CLIENT:
-        return (o, d)
+        return (_start(o), d)
     if ts in (TS.ASSIGNED, TS.TO_CLIENT):
         # Approach = driver's CURRENT position → pickup. Without a fresh fix we
         # don't know where they are, so skip (no fake origin→origin line that
@@ -215,6 +222,14 @@ def order_leg(meta, driver_pos=None):
             return None  # already on the pickup point → no line
         return (driver_pos, o)
     return None  # waiting → parked, no moving route
+
+
+def min_dist_km_to_polyline(lat, lng, geom):
+    """Min great-circle distance (km) from a point to a polyline's vertices —
+    a cheap «how far off the route am I» check for re-routing on deviation."""
+    if not geom:
+        return float("inf")
+    return min(_haversine_km((lat, lng), (p[1], p[0])) for p in geom if len(p) >= 2)
 
 
 def push_order_route(meta, driver_pos=None):

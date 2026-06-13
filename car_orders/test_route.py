@@ -40,7 +40,23 @@ def test_leg_approach_skipped_without_position():
 @pytest.mark.django_db
 def test_leg_in_trip_is_pickup_to_destination():
     m = _order(TS.IN_TRIP)
-    assert dispatch.order_leg(m) == ((41.31, 69.24), (41.35, 69.29))
+    assert dispatch.order_leg(m) == ((41.31, 69.24), (41.35, 69.29))  # no fix → pickup→dest
+
+
+@pytest.mark.django_db
+def test_leg_in_trip_reroutes_from_driver_position():
+    # With a live fix the in-trip leg starts at the driver's CURRENT spot (so a
+    # re-route follows the road taken) → destination, not pickup→dest.
+    m = _order(TS.IN_TRIP)
+    assert dispatch.order_leg(m, driver_pos=(41.33, 69.26)) == ((41.33, 69.26), (41.35, 69.29))
+
+
+def test_min_dist_to_polyline():
+    geom = [[69.20, 41.30], [69.21, 41.305], [69.22, 41.31]]  # [lng,lat]
+    on_route = dispatch.min_dist_km_to_polyline(41.305, 69.21, geom)
+    off_route = dispatch.min_dist_km_to_polyline(41.40, 69.40, geom)
+    assert on_route < 0.05  # on the line
+    assert off_route > 1.0  # strayed far
 
 
 @pytest.mark.django_db
