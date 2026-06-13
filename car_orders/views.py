@@ -636,18 +636,6 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
     return updated
 
 
-def _point_coords(p):
-    """Extract (lat, lng) floats from a point, tolerating key variants."""
-    if not isinstance(p, dict):
-        return None, None
-    lat = p.get("lat", p.get("latitude"))
-    lng = p.get("lng", p.get("lon", p.get("longitude")))
-    try:
-        return (float(lat), float(lng)) if lat is not None and lng is not None else (None, None)
-    except (TypeError, ValueError):
-        return None, None
-
-
 class DriverLocationView(APIView):
     """The driver app posts its GPS ONCE here; the server attaches it to the
     driver's ACTIVE order and fans it out over WebSocket — so the mobile app
@@ -665,49 +653,6 @@ class DriverLocationView(APIView):
             driver_id, serializer.validated_data["lat"], serializer.validated_data["lng"], _src(request)
         )
         return Response({"updated_orders": updated})
-
-
-class LocationBatchView(APIView):
-    """The mobile app uploads a BATCH of buffered GPS points to
-    ``/api/v1/location/batch/`` (offline queue) — without this it 404s and the
-    phone's position never reaches us. We take the LATEST point and attach it to
-    the driver's active order. Format-tolerant: ``{locations|points|items:[...]}``
-    or a bare list; each point ``{lat|latitude, lng|lon|longitude, driver_id?,
-    timestamp|recorded_at?}``. Mounted BEFORE the gateway catch-all."""
-
-    authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
-
-    def post(self, request):
-        data = request.data
-        if isinstance(data, list):
-            points, top_driver = data, None
-        elif isinstance(data, dict):
-            points = data.get("locations") or data.get("points") or data.get("items") or []
-            top_driver = data.get("driver_id")
-        else:
-            points, top_driver = [], None
-        if not isinstance(points, list) or not points:
-            _log_tracking(f"📦 BATCH [{_src(request)}] пустой/неизвестный формат: {str(data)[:300]}")
-            return Response({"updated_orders": [], "accepted": 0})
-
-        def stamp(p):
-            return (p.get("timestamp") or p.get("recorded_at") or p.get("time") or "") if isinstance(p, dict) else ""
-
-        latest = max(points, key=stamp) if any(stamp(p) for p in points) else points[-1]
-        lat, lng = _point_coords(latest)
-        driver_id = acting_driver_id(
-            request, (latest.get("driver_id") if isinstance(latest, dict) else None) or top_driver
-        )
-        if lat is None or lng is None or driver_id is None:
-            _log_tracking(
-                f"📦 BATCH [{_src(request)}] не разобрал координаты/водителя "
-                f"(driver={driver_id}) из: {str(data)[:300]}"
-            )
-            return Response({"updated_orders": [], "accepted": len(points)})
-        _log_tracking(f"📦 BATCH [{_src(request)}] {len(points)} точек, беру последнюю")
-        updated = _apply_driver_location(driver_id, lat, lng, _src(request))
-        return Response({"updated_orders": updated, "accepted": len(points)})
 
 
 class DriverShiftView(APIView):
