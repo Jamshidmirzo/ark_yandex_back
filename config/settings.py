@@ -222,6 +222,10 @@ AUTO_DISPATCH_POS_MAX_AGE = env.int("AUTO_DISPATCH_POS_MAX_AGE", default=180)
 # without a phone.
 AUTO_SIMULATE_ENABLED = env.bool("AUTO_SIMULATE_ENABLED", default=False)
 
+# Print a console line for each driver GPS heartbeat + trip-state change, so you
+# can watch in real time what the mobile app sends. Set LOG_TRACKING=0 to silence.
+LOG_TRACKING = env.bool("LOG_TRACKING", default=True)
+
 
 # CORS — allow the Vite dev frontend (ark_yandex_front) to call the API.
 CORS_ALLOWED_ORIGINS = env(

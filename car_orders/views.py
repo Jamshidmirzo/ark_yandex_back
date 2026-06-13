@@ -74,6 +74,15 @@ def _bad_request(code, message):
     )
 
 
+def _log_tracking(message):
+    """Console line for GPS heartbeats / trip-state changes — so you can watch in
+    real time what the mobile app sends. Toggle with settings.LOG_TRACKING."""
+    from django.conf import settings
+
+    if getattr(settings, "LOG_TRACKING", False):
+        print(message, flush=True)
+
+
 def _clear_live_location(pk):
     """Drop the stored live position once an order is done/cancelled/reassigned,
     so a dead marker doesn't linger on the map or in «Мои заказы»."""
@@ -478,6 +487,7 @@ class TripStateView(APIView):
             _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": state, "returning": meta.returning})
         notify_order_status(meta, state)  # toast to driver + requester
+        _log_tracking(f"🚦 STATUS #{pk} driver={meta.driver_id} → {state}")
         return Response(OrderMetaSerializer(meta).data)
 
 
@@ -614,7 +624,7 @@ class DriverLocationView(APIView):
         # (assigned / en route / parked) — no simulator needed. Geometry is left to
         # the route the order already carries.
         terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-        metas = OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal)
+        metas = list(OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal))
         updated = []
         for meta in metas:
             OrderLiveLocation.objects.update_or_create(
@@ -625,6 +635,14 @@ class DriverLocationView(APIView):
             broadcast_location(
                 meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()}
             )
+        _log_tracking(
+            f"📍 GPS driver={driver_id} ({lat:.5f},{lng:.5f}) → "
+            + (
+                ", ".join(f"#{m.order_id} [{m.trip_state}]" for m in metas)
+                if metas
+                else "нет активного заказа"
+            )
+        )
         return Response({"updated_orders": updated})
 
 
