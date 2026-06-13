@@ -198,6 +198,17 @@ CAR_ORDER_DEFAULT_SERVICE = timedelta(minutes=env.int("CAR_ORDER_DEFAULT_SERVICE
 CAR_ORDER_OSRM_URL = env("CAR_ORDER_OSRM_URL", default="https://router.project-osrm.org")
 
 
+# Backend auto-dispatch worker (`manage.py auto_dispatch`). Assigns awaiting orders
+# to the nearest free driver server-side, so it works with no dispatcher tab open.
+AUTO_DISPATCH_ENABLED = env.bool("AUTO_DISPATCH_ENABLED", default=True)
+# Assign a SCHEDULED order this many minutes before its pickup time.
+AUTO_DISPATCH_LEAD_MIN = env.int("AUTO_DISPATCH_LEAD_MIN", default=45)
+# Assign an ASAP order once it has waited this long unclaimed.
+AUTO_DISPATCH_STALE_SEC = env.int("AUTO_DISPATCH_STALE_SEC", default=180)
+# Ignore driver GPS fixes older than this when ranking by distance.
+AUTO_DISPATCH_POS_MAX_AGE = env.int("AUTO_DISPATCH_POS_MAX_AGE", default=180)
+
+
 # CORS — allow the Vite dev frontend (ark_yandex_front) to call the API.
 CORS_ALLOWED_ORIGINS = env(
     "CORS_ALLOWED_ORIGINS",

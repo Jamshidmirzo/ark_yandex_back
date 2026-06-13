@@ -445,6 +445,15 @@ class OrderMeta(TimestampMixin):
     )
     # Urgent (e.g. for a live broadcast) — sorted first and flagged for dispatch.
     is_urgent = models.BooleanField(default=False, verbose_name=_("Urgent"))
+    # The order's required car type (mirrored from demo at create time) so the
+    # backend auto-dispatch worker can match drivers without calling demo.
+    car_type_id = models.PositiveIntegerField(
+        null=True, blank=True, db_index=True, verbose_name=_("Car type id")
+    )
+    # True once the order is approved and ready for a driver. The backend
+    # auto-dispatch worker only considers dispatchable + driverless orders, so a
+    # draft / unapproved order is never auto-assigned.
+    dispatchable = models.BooleanField(default=False, db_index=True, verbose_name=_("Ready for dispatch"))
     # Set once we've reminded the driver it's time to head to this order, so the
     # «пора выезжать» nudge fires only once.
     departure_reminded = models.BooleanField(default=False, verbose_name=_("Departure reminded"))
