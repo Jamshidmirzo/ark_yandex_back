@@ -437,6 +437,9 @@ class OverlayClaimView(APIView):
                 meta.returning = False  # start the trip from the first leg again
                 meta.save(update_fields=["trip_state", "returning"])
         notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
+        from car_orders import dispatch
+
+        dispatch.push_order_route(meta)  # send the approach route on assignment
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -497,6 +500,11 @@ class TripStateView(APIView):
             _clear_live_location(pk)
         broadcast_location(pk, {"trip_state": state, "returning": meta.returning})
         notify_order_status(meta, state)  # toast to driver + requester
+        # Server owns the route: push the geometry for the NEW leg (approach to
+        # pickup / pickup→destination / return), so the map always shows where to go.
+        from car_orders import dispatch
+
+        dispatch.push_order_route(meta)
         _log_tracking(f"🚦 STATUS [{_src(request)}] #{pk} driver={meta.driver_id} → {state}")
         return Response(OrderMetaSerializer(meta).data)
 

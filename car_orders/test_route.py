@@ -1,0 +1,81 @@
+"""The server owns the route: on assignment and on every trip-state change it
+computes the current leg and broadcasts geometry, so the map always shows where
+the driver should go — at every stage, not only once the trip is started."""
+
+import pytest
+from django.test import override_settings
+
+from car_orders import dispatch
+from car_orders.models import OrderLiveLocation, OrderMeta
+
+TS = OrderMeta.TripState
+
+
+def _order(state, returning=False, has_return=False):
+    return OrderMeta.objects.create(
+        order_id=900, driver_id=5, overlay_claimed=True, trip_state=state,
+        origin_lat=41.31, origin_lng=69.24, address_lat=41.35, address_lng=69.29,
+        has_return=has_return, returning=returning, return_lat=41.30, return_lng=69.20,
+    )
+
+
+# ---- which leg per stage --------------------------------------------------
+
+@pytest.mark.django_db
+def test_leg_approach_uses_driver_position_when_to_client():
+    m = _order(TS.TO_CLIENT)
+    leg = dispatch.order_leg(m, driver_pos=(41.10, 69.10))
+    assert leg == ((41.10, 69.10), (41.31, 69.24))  # driver → pickup
+
+
+@pytest.mark.django_db
+def test_leg_approach_falls_back_to_pickup_without_position():
+    m = _order(TS.ASSIGNED)
+    assert dispatch.order_leg(m, driver_pos=None) == ((41.31, 69.24), (41.31, 69.24))
+
+
+@pytest.mark.django_db
+def test_leg_in_trip_is_pickup_to_destination():
+    m = _order(TS.IN_TRIP)
+    assert dispatch.order_leg(m) == ((41.31, 69.24), (41.35, 69.29))
+
+
+@pytest.mark.django_db
+def test_leg_return_is_destination_to_return_point():
+    m = _order(TS.IN_TRIP, returning=True, has_return=True)
+    assert dispatch.order_leg(m) == ((41.35, 69.29), (41.30, 69.20))
+
+
+@pytest.mark.django_db
+def test_leg_at_destination_with_return_previews_the_way_back():
+    m = _order(TS.AT_DESTINATION, has_return=True)
+    assert dispatch.order_leg(m) == ((41.35, 69.29), (41.30, 69.20))
+
+
+@pytest.mark.django_db
+def test_leg_none_when_parked_or_terminal():
+    assert dispatch.order_leg(_order(TS.WAITING)) is None
+    OrderMeta.objects.all().delete()
+    assert dispatch.order_leg(_order(TS.AT_DESTINATION)) is None  # final, no return
+    OrderMeta.objects.all().delete()
+    assert dispatch.order_leg(_order(TS.COMPLETED)) is None
+
+
+# ---- push stores + broadcasts geometry ------------------------------------
+
+@override_settings(CAR_ORDER_OSRM_URL="")  # force the offline haversine path (no network)
+@pytest.mark.django_db
+def test_push_order_route_stores_geometry():
+    m = _order(TS.IN_TRIP)
+    geom = dispatch.push_order_route(m)
+    assert geom and isinstance(geom, list)
+    loc = OrderLiveLocation.objects.get(order_id=900)
+    assert loc.geometry == geom  # persisted for late WS subscribers
+
+
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_push_returns_none_when_parked():
+    m = _order(TS.WAITING)
+    assert dispatch.push_order_route(m) is None
+    assert not OrderLiveLocation.objects.filter(order_id=900).exists()

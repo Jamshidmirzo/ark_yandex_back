@@ -122,6 +122,7 @@ def claim(order_id, driver_id, car_id, car_label):
         meta.trip_state = OrderMeta.TripState.ASSIGNED
         meta.save()
     notify_order_status(meta, OrderMeta.TripState.ASSIGNED)
+    push_order_route(meta)  # send the approach route the moment it's assigned
     return True
 
 
@@ -145,6 +146,82 @@ def queue_orders():
             origin_lng__isnull=False,
         ).exclude(trip_state__in=TERMINAL)
     )
+
+
+def _latest_pos(driver_id):
+    if driver_id is None:
+        return None
+    p = DriverPosition.objects.filter(driver_id=driver_id).first()
+    return (p.lat, p.lng) if p else None
+
+
+def order_leg(meta, driver_pos=None):
+    """The ``((slat,slng),(elat,elng))`` the driver should drive at THIS stage, or
+    None. We always describe what the driver should do NEXT, so the server owns the
+    route at every stage — not only once the trip is started:
+      assigned / to_client → (driver's position → pickup)   approach
+      at_client / in_trip  → (pickup → destination)          the trip
+      in_trip (returning)  → (destination → return point)    the way back
+      at_destination + has_return & !returning → (dest → return)  preview of return
+      waiting / at_destination(final) / terminal → None      (parked)
+    """
+    ts = meta.trip_state
+    if ts in TERMINAL:
+        return None
+    o = (meta.origin_lat, meta.origin_lng)
+    d = (meta.address_lat, meta.address_lng)
+    if None in o or None in d:
+        return None
+    r = (
+        (meta.return_lat, meta.return_lng)
+        if meta.return_lat is not None and meta.return_lng is not None
+        else o
+    )
+    TS = OrderMeta.TripState
+    if ts == TS.IN_TRIP:
+        return (d, r) if meta.returning else (o, d)
+    if ts == TS.AT_DESTINATION:
+        return (d, r) if (meta.has_return and not meta.returning) else None
+    if ts == TS.AT_CLIENT:
+        return (o, d)
+    if ts in (TS.ASSIGNED, TS.TO_CLIENT):
+        start = driver_pos if (driver_pos and driver_pos[0] is not None) else o
+        return (start, o)
+    return None  # waiting → parked, no moving route
+
+
+def push_order_route(meta, driver_pos=None):
+    """Compute the current leg's route (OSRM) and broadcast its geometry + store it
+    on OrderLiveLocation, so the map always shows where the driver should go — the
+    server controls navigation. Called on assignment and every trip-state change.
+    Returns the geometry, or None when the stage has no moving leg."""
+    if meta is None:
+        return None
+    if driver_pos is None:
+        driver_pos = _latest_pos(meta.driver_id)
+    leg = order_leg(meta, driver_pos)
+    if not leg:
+        return None
+    (slat, slng), (elat, elng) = leg
+    from car_orders import services
+    from car_orders.models import OrderLiveLocation
+    from car_orders.ws import broadcast_location
+
+    try:
+        geom = services.estimate_route(slat, slng, elat, elng).get("geometry")
+    except Exception:
+        geom = None
+    if not geom:
+        return None
+    loc, created = OrderLiveLocation.objects.get_or_create(
+        order_id=meta.order_id,
+        defaults={"lat": slat, "lng": slng, "last_seen": timezone.now(), "geometry": geom},
+    )
+    if not created:
+        loc.geometry = geom
+        loc.save(update_fields=["geometry"])
+    broadcast_location(meta.order_id, {"geometry": geom})
+    return geom
 
 
 def run_once(first_seen, now=None, *, lead_min, stale_sec, pos_max_age, max_load=1):
