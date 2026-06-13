@@ -167,11 +167,17 @@ the **button** column shows the literal Russian button label the driver taps.
 > A normal order (no return) **completes** at `at_destination` — no `waiting`/“continue”. `waiting` is
 > only a manual pause now.
 
-- `400 INVALID_STATUS` — you can’t change the stage of an already **completed** order.
-- Geofence (**hard gate**): the “I’m here” and “Arrived” buttons appear **only** when the driver is
-  within the zone (**~100 m**) of the pickup/destination **and** with a fresh GPS fix — so arrival
-  can't be marked from afar. While far, the distance to the point is shown instead. 100 m because the
-  pin is often dropped inside a building the car can't enter — it's "at the entrance", not "on the pin".
+**The server now enforces stages strictly (not just the UI):**
+- **Stage order** — only along the chain above. A jump (e.g. `to_client → in_trip` skipping
+  `at_client`) → `400 INVALID_TRANSITION`. An idempotent repeat of the same stage is fine.
+- **Completion** — `completed` only from `at_destination` (and for a round trip — after the return
+  leg), otherwise `400 INVALID_TRANSITION`. `400 INVALID_STATUS` — on an already completed order.
+- **Only the assigned driver** (or a dispatcher) advances the stage — otherwise `403`.
+- **Arrival geofence (hard gate on the server)**: `at_client` / `at_destination` are accepted **only**
+  when the driver has a **fresh GPS** fix (≤120 s) within **100 m** of the pickup/destination point —
+  otherwise `400 TOO_FAR` or `400 NO_FRESH_GPS`. So you **must** stream GPS (§04). In the UI, while far,
+  show the distance instead of the button. (The radius is `CAR_ORDER_ARRIVAL_GEOFENCE_M`, `0` disables
+  it for testing.)
 - Planned time (**soft, not a block**): the driver may start before `planned_datetime`. Starting much
   earlier (more than **30 min** before the pickup) shows an “you're leaving early” notice; and once at
   the pickup **before** the planned time, it shows “wait ≈ N min” (until `planned_datetime`). Claiming

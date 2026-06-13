@@ -43,7 +43,11 @@ normalise: “if there’s `results` use it, else the array itself”.
 | `ALREADY_CLAIMED` | 400 | `overlay-claim` of an order already taken by **another** driver |
 | `HAS_ACTIVE_ORDERS` | 400 | changing the shift car (`PATCH /drivers/me/shift/`) while orders are active — finish them first |
 | `ACTIVE_TRIP_EXISTS` | 400 | `trip-state`: you can’t start driving a second order while you’re already driving another |
+| `INVALID_TRANSITION` | 400 | `trip-state`: jumping past a stage / `completed` not from `at_destination` (§3.6) |
+| `TOO_FAR` | 400 | `trip-state` `at_client`/`at_destination`: the driver is more than 100 m from the point (geofence) |
+| `NO_FRESH_GPS` | 400 | `trip-state` arrival without a fresh GPS fix — stream the position (§04) |
 | `INVALID_STATUS` | 400 | changing `trip_state` of a completed order |
+| `403` (PERMISSION_DENIED) | 403 | `trip-state` advanced by a driver who isn’t the assigned one |
 | `NOT_FOUND` | 400 | no meta/window (e.g. `reassign`/`extend` without an overlay) |
 
 > Orders are usually assigned by the **server** (auto-dispatch) — they arrive in “My orders” already at `assigned`.
@@ -99,3 +103,5 @@ stay reachable; `reassign` is dispatcher-only (`car_order:approve`).
 
 > Mobile scheme: the app calls `host/<lang>/api/v1/...` (language in the path) — the gateway strips the
 > prefix and routes it like `/api/v1/...`. URL probe — `host/healthcheck/` → `200 {"status":"ok"}`. See [README](README.md).
+</content>
+</invoke>

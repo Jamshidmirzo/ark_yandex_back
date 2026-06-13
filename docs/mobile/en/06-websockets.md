@@ -56,9 +56,9 @@ ws://<host>:8000/ws/driver/track/?driver_id=670        # dev fallback
 }
 ```
 - `lat`/`lng` — **where the marker is now** (move it along the line).
-- `geometry` — the **current leg's polyline**; sent **only when it changed** (a new stage, or the
-  approach route was recomputed after moving >200 m). When it arrives — **redraw** the line; when it
-  doesn't — keep the previous one and just move the marker.
+- `geometry` — the **current leg's polyline**; sent **only when it changed** (a new stage, or a
+  **re-route** — the driver strayed >80 m off the line, turned the wrong way). When it arrives —
+  **redraw** the line; when it doesn't — keep the previous one and just move the marker.
 - `order_id`/`trip_state` — the driver's current active order and its stage. `order_id:null` — the
   driver has no active order (just on shift).
 - No network → buffer fixes and resend on reconnect.
@@ -97,7 +97,7 @@ Position (move the marker):
 ```json
 { "lat": 41.30050, "lng": 69.20050, "last_seen": "2026-06-13T09:05:12Z", "geometry": [[69.20,41.30], ...] }
 ```
-- `geometry` arrives on connect and **on every stage change / approach recompute** — on a new one, **replace** the line.
+- `geometry` arrives on connect and **on every stage change and on re-route (deviation >80 m off the line)** — on a new one, **replace** the line.
 
 Stage change (update the banner):
 ```json

@@ -52,8 +52,10 @@ That's it — no `order_id` needed; the server figures out which order is active
 
 When does `geometry` change (and thus arrive)?
 - the order is **assigned** / you tapped **«on the way»** → the approach route **your position → pickup**;
-- it is **recomputed** as you drive the approach (whenever you move >200 m);
-- a **stage change** (pickup→destination, the return leg).
+- a **stage change** (pickup→destination, the return leg);
+- a **route deviation** — you turned the wrong way (strayed **>80 m** off the line) → the server recomputes
+  the route from your current point along the road you actually took (like a navigator). Drive straight
+  along the line → no recompute.
 
 So: **always** move the marker to `lat/lng`; **replace** the route only when a new `geometry` arrives.
 
