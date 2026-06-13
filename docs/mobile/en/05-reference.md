@@ -39,10 +39,16 @@ normalise: “if there’s `results` use it, else the array itself”.
 | code | HTTP | When |
 |---|---|---|
 | `VALIDATION` | 400 | bad body / `trip_state` |
-| `conflict` (field) | 200 | window overlap — **a warning, not a block**: `claim-check`/`overlay-claim` return `conflict`, but the claim still goes through (§3.3–3.4) |
-| `ALREADY_CLAIMED` | 400 | `overlay-claim` of someone else’s active order — **the only hard block** |
+| `DRIVER_BUSY` | 400 | `overlay-claim`: the driver **already has an active order** (“one active order per driver”) — finish the current one, then take the next (§3.4) |
+| `ALREADY_CLAIMED` | 400 | `overlay-claim` of an order already taken by **another** driver |
+| `HAS_ACTIVE_ORDERS` | 400 | changing the shift car (`PATCH /drivers/me/shift/`) while orders are active — finish them first |
+| `ACTIVE_TRIP_EXISTS` | 400 | `trip-state`: you can’t start driving a second order while you’re already driving another |
 | `INVALID_STATUS` | 400 | changing `trip_state` of a completed order |
 | `NOT_FOUND` | 400 | no meta/window (e.g. `reassign`/`extend` without an overlay) |
+
+> Orders are usually assigned by the **server** (auto-dispatch) — they arrive in “My orders” already at `assigned`.
+> `claim-check` is now informational (see §3.3): even `ok:true` doesn’t guarantee a claim — if the driver
+> already has an active order, the server returns `DRIVER_BUSY`.
 
 **demo (DRF):** `{"detail":"..."}` (e.g. `"This car is not available."` — car busy on an active
 order) or `{"field":["..."]}` / `{"non_field_errors":["..."]}`.

@@ -7,7 +7,7 @@ draft ──submit──▶ pending ──admin-approve──▶ awaiting_driver
    └────────────────────── reject(reason) ──────────────────────▶ rejected
 ```
 
-> Trip stages (en route / arrived / waiting) and sequential same-car orders are in
+> Trip stages (en route / arrived / waiting) are in
 > [03-scheduling-overlay.md](03-scheduling-overlay.md). Live position is in [04-live-tracking.md](04-live-tracking.md).
 
 ## List orders
@@ -106,12 +106,15 @@ Only `reject` and `claim` take a body; the rest are empty `POST`s. All return th
 ### Claim — important
 `POST /car-orders/{id}/claim/` `{ "car_id": 5 }`
 
-demo rules (may return an error):
-- **One car — one active order.** If the car already has an `in_progress` order → `400` `"This car is not available."`
-- **One driver — one active order.** If the driver already has an active one → error.
+Rules (may return an error):
+- **One driver — one active order.** If the driver already has an active order → error
+  (demo: `claim`; our layer: `overlay-claim` → `400 DRIVER_BUSY`). You can take a second order only
+  after finishing the current one. This rule is shared by both paths (see [03 §3.4](03-scheduling-overlay.md)).
+- **One car — one active order** (demo): if the car already has an `in_progress` order → `400`
+  `"This car is not available."`
 
-To take a **2nd order with the same car sequentially** (non-overlapping windows), don’t use demo
-`claim` — use our `overlay-claim` (see [03-scheduling-overlay.md](03-scheduling-overlay.md)).
+> Most of the time you don’t need to claim manually — the **server** assigns the order (auto-dispatch)
+> and it arrives in “My orders” already assigned (see [03 §3.8](03-scheduling-overlay.md)).
 
 ## Driver’s cars
 
@@ -120,4 +123,4 @@ To take a **2nd order with the same car sequentially** (non-overlapping windows)
 [ { "id": 5, "model": "Cobalt", "plate_number": "01A777AA", "is_available": true } ]
 ```
 Use it for the claim car-picker. `is_available: false` = the car is currently busy on an active
-order (but it can still be taken for a sequential order via `overlay-claim`).
+order.

@@ -6,9 +6,9 @@ Per-section docs for integrating a mobile client (Flutter / Kotlin / Swift) with
 ## Sections
 1. [Connection & auth](01-auth.md) — base URL, login, refresh, tokens.
 2. [Car orders](02-car-orders.md) — list, detail, create, workflow (submit/approve/claim/complete).
-3. [Scheduling & overlay](03-scheduling-overlay.md) — route estimate, meta, claim-check, sequential claim, trip-state machine.
-4. [Live tracking (REST + WebSocket)](04-live-tracking.md) — real-time driver position & route.
-5. [Reference](05-reference.md) — statuses, trip_state, error format, pagination, endpoint map.
+3. [Scheduling & overlay](03-scheduling-overlay.md) — **trip stages** (how to start and run them), claiming an order, auto-computed route/duration, “one active order per driver”, auto-dispatch.
+4. [Live tracking (REST + WebSocket)](04-live-tracking.md) — real-time driver position & route on the map.
+5. [Reference](05-reference.md) — statuses, trip_state, error format, pagination.
 
 ---
 
@@ -29,8 +29,8 @@ what to proxy to the big `demo` backend:
 ```
 
 - **Login and base data** (accounts, orders, drivers, cars) come from `demo`.
-- **New features** (route estimate, duration/windows, sequential same-car orders, trip stages,
-  live tracking) are served **locally by this gateway**.
+- **New features** (route estimate, duration/windows, trip stages, live tracking) are served
+  **locally by this gateway**.
 - The app does **not** need to know what is proxied vs local — it always hits one base URL.
 
 ## Base URL
@@ -73,9 +73,12 @@ Details in [01-auth.md](01-auth.md).
 2. `GET /car-orders/?status=awaiting_driver` → available orders.
 3. `GET /car-orders/{id}/` → detail.
 4. **Accept:**
-   - car is free → `POST /car-orders/{id}/claim/` `{car_id}` (demo) + `POST /meta/ {driver_id}`;
-   - your own busy car (a 2nd order on the same car) → `POST /car-orders/{id}/overlay-claim/`
-     `{driver_id, car_id, car_label}`. Before accepting, check the window: `POST /claim-check/ {driver_id}`.
+   - the server **auto-dispatches** orders to the nearest free on-shift driver — the order arrives
+     already assigned in **“My orders”** (overlay-orders), so manual claim is rarely needed;
+   - if you do claim manually → `POST /car-orders/{id}/claim/` `{car_id}` (demo) + `POST /meta/ {driver_id}`,
+     or `POST /car-orders/{id}/overlay-claim/` `{driver_id, car_id, car_label}`. Note: **one active order
+     per driver** — if you already have an active order, overlay-claim returns `400 DRIVER_BUSY`. Finish
+     the current order before taking the next one.
 5. **Stages** (each pushed over WS): `POST /trip-state/` `{trip_state}`:
    `to_client → at_client → in_trip → at_destination → waiting`.
 6. Connect to `ws://.../ws/car-orders/{id}/location/` → live driver position + route.

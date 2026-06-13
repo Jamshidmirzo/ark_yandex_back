@@ -28,8 +28,12 @@ Position message:
 ```json
 { "lat": 41.32219, "lng": 69.20615, "last_seen": "2026-06-11T09:05:12Z", "geometry": [[69.24,41.31], ...] }
 ```
-- `geometry` arrives **once** (in the first message after connect) — it’s the A→B route. Later
-  messages don’t include it, so **keep** what you got.
+- `geometry` — the route of the **current leg**, computed and pushed by the **server** (it owns
+  navigation). It arrives in the first message after connect **and again on every stage change**
+  (`trip-state`): approach (`assigned`/`to_client`) → `driver position → pickup point`; trip
+  (`at_client`/`in_trip`) → `pickup → destination`; return → `destination → return point`. On parked
+  stages (`waiting`/terminal `at_destination`) there is no route. Between messages **keep** the last
+  one you got and draw it as a line; on a new `geometry` — **replace** it.
 
 Stage-change message:
 ```json
@@ -85,8 +89,10 @@ Poll every 3 s if you don’t use the WebSocket.
   1. stores a **per-driver position** (`DriverPosition`) — used by the dispatcher to find the
      **nearest free** driver. So send GPS **even while the driver is just on shift with no active
      order** — otherwise they won't appear in «Рекомендуем».
-  2. if the driver has a **moving** order (stage `to_client`/`in_trip`), attaches the position to it
-     (`OrderLiveLocation`) and fans it out over WebSocket (downlink).
+  2. attaches the position to the driver's **active** order (any non-terminal stage, not only
+     `to_client`/`in_trip`) — `OrderLiveLocation` — and fans it out over WebSocket (downlink). With
+     the "one active order per driver" rule this is exactly their current order, so the map moves on
+     any stage.
 - Response: `{ "updated_orders": [88] }` — which orders it applied to (usually one). If nothing is
   being driven → `{ "updated_orders": [] }` (the per-driver position is still saved).
 
@@ -116,9 +122,13 @@ If the order has `meta` with A→B coordinates, the route is computed automatica
 dot without a line. So **save the coordinates to `meta`** when creating the order.
 
 ## 4.3 Simulator (testing without a phone)
-`python manage.py auto_simulate` continuously drives every active order — like the mobile app will.
-It is **driver-centric and phase-aware**: one driver = one car = one position, which **carries across
-orders**:
+> **Off by default (updated 2026-06):** real phones stream GPS to `/drivers/me/location/`, and the
+> simulator would conflict with them. To run it for testing **without a phone** — set
+> `AUTO_SIMULATE_ENABLED=1` or pass the `--force` flag. Do not run it against real drivers.
+
+`python manage.py auto_simulate --force` continuously drives every active order — like the mobile app
+will. It is **driver-centric and phase-aware**: one driver = one car = one position, which **carries
+across orders**:
 
 - stage `to_client` — drives from the **driver's current position** to the **pickup** (origin). This
   is also the "empty" leg **between orders**: after finishing order 1 at its destination the driver

@@ -7,8 +7,15 @@ These endpoints are served **locally by the gateway** (demo doesn’t have them)
 > `geometry` is an array of `[lng, lat]` (GeoJSON); flip to `[lat, lng]` for maps.
 
 ## Why the overlay (short)
-demo stores the base order but can’t hold: the A→B route, duration/windows, **trip stages**, and
-**sequential same-car orders**. We keep all of that in `OrderMeta` keyed by the order id.
+demo stores the base order but can’t hold: the A→B route, duration/windows, and **trip stages**.
+We keep all of that in `OrderMeta` keyed by the order id.
+
+> **Model (updated 2026-06):** the rule **“one active order per driver”** applies. Assignment is done
+> by the **server automatically** (auto-dispatch): to the nearest free on-shift driver with the right
+> car type. The order **arrives already assigned** for the driver — take it from “My orders” (§3.8) and
+> run it through the stages (§3.6). Taking a **second** active order is not allowed until the current
+> one is completed (`overlay-claim` returns `400 DRIVER_BUSY` — §3.4). The previous
+> “sequential orders on one car / gap-filling during a shoot” model is **gone**.
 
 ---
 
@@ -82,16 +89,12 @@ Response:
 { "ok": true,  "conflict": null }
 { "ok": false, "conflict": { "order_id":90, "planned_start":"...", "planned_end":"...", "address":"Order #90" } }
 ```
-Checks the order’s **driving** window against the driver’s other active orders (+ a travel buffer).
-Completed/cancelled/**parked** (`at_destination`/`waiting`) windows don’t count.
+An informational check of the order’s window against the driver’s active orders (+ a travel buffer).
 
-> **Important (changed):** `ok:false` is a **warning, not a block**. Claiming is still allowed
-> (see §3.4) — show the conflict as a warning but let them accept. Filling gaps during a long shoot is
-> the product's point, so a hard block is wrong. The only hard block is an order already taken by a
-> **different** driver.
->
-> **On-site time is FREE.** The window is computed over **driving** time only
-> (`planned_end − service_time`), so a long on-site wait doesn’t “occupy” the driver or stop a gap order.
+> With the rule **“one active order per driver”** (see top), this is mostly a reference check: if the
+> driver already has an active order, claiming a second one is blocked on the server anyway
+> (`overlay-claim` → `400 DRIVER_BUSY`, §3.4) regardless of the claim-check result. Use it for a hint
+> in the list, not as permission.
 
 **Batch (for the list screen)** — so you don't call them one by one:
 - `POST /car-orders/claim-check-batch/` `{ "driver_id":671, "order_ids":[88,90] }` →
@@ -101,27 +104,29 @@ Completed/cancelled/**parked** (`at_destination`/`waiting`) windows don’t coun
 
 ---
 
-## 3.4 Claiming — two paths
+## 3.4 Claiming an order
+
+Most often you **don’t need** to claim manually — the server assigns the order to the driver itself
+(auto-dispatch), and it shows up in “My orders” (§3.8) already at `trip_state=assigned`. From there
+run it through the stages (§3.6).
+
+If a claim is still needed (manual scenario):
 
 | Case | How to accept | Result |
 |---|---|---|
 | Car is **free** | demo `claim`: `POST /car-orders/{id}/claim/` `{car_id}` (section 02) → then `POST /meta/ {driver_id}` | demo `in_progress` |
-| Car is **busy** (your own, you’re driving it on another order) | **`overlay-claim`** (below) | claimed in our layer, `overlay_claimed=true`, `trip_state=assigned` |
-
-demo forbids “one car — one active order”, so a 2nd order on the same car is only possible via
-`overlay-claim`.
+| Assignment via our layer | **`overlay-claim`** (below) | claimed in our layer, `overlay_claimed=true`, `trip_state=assigned` |
 
 ### `overlay-claim`
 `POST /car-orders/{id}/overlay-claim/`
 ```json
 { "driver_id":671, "car_id":5, "car_label":"Cobalt (01A777AA)" }
 ```
-- `{ "ok": true, "conflict": null, "meta": {...} }` — accepted, no overlap.
-- `{ "ok": true, "conflict": {...}, "meta": {...} }` — **accepted, but there's a time overlap**
-  (a warning — the order is taken anyway; show “mind the timing” and proceed).
-- `400 ALREADY_CLAIMED` — the order is already taken by a **different** driver (and still active) —
-  the **only** hard block.
-- Re-calling as the same driver does **not** reset the current stage (won’t rewind the trip).
+- `{ "ok": true, "conflict": null, "meta": {...} }` — accepted.
+- `400 DRIVER_BUSY` — the driver **already has an active order** (the “one active” rule). Finish the
+  current one first (`completed`) — then you can take the next.
+- `400 ALREADY_CLAIMED` — the order is already taken by a **different** driver (and still active).
+- Re-calling as the same driver on the **same** order is idempotent — the current stage isn’t rewound.
 
 ---
 
@@ -171,13 +176,9 @@ the **button** column shows the literal Russian button label the driver taps.
   earlier (more than **30 min** before the pickup) shows an “you're leaving early” notice; and once at
   the pickup **before** the planned time, it shows “wait ≈ N min” (until `planned_datetime`). Claiming
   and proceeding are still allowed — it's only a notice.
-- One trip at a time (`400 ACTIVE_TRIP_EXISTS`): you can't start **driving** a 2nd order while already
-  driving one (`to_client`/`in_trip`). But a **parked** driver (`waiting` / `at_destination` — e.g. on
-  hold during a long shoot) **can take a gap order** — that's the whole point.
-
-> **Long shoot → keep the driver busy.** While the driver is parked (`at_destination`/`waiting`) they
-> can take a gap order: the window check treats on-site time as free (§3.3) and claiming isn't blocked
-> (§3.4). “Drop off and pick back up” is **one round-trip order** (§3.6.1), not two separate ones.
+- One active order per driver: you can't take a second one until the current is completed
+  (`overlay-claim` → `400 DRIVER_BUSY`, §3.4). “Drop off and pick back up” is **one round-trip order**
+  (§3.6.1), not two separate ones.
 
 ---
 
