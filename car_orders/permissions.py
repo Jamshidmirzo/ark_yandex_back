@@ -29,8 +29,10 @@ class OverlayAuthenticated(BasePermission):
 
 class OverlayDispatcher(BasePermission):
     """Dispatcher-only actions (e.g. reassign). When enforced, require the
-    ``car_order:approve`` codename; if perms aren't available from ``/auth/me/``,
-    fall back to any authenticated user (graceful)."""
+    ``car_order:approve`` codename (or superuser). Fails CLOSED when perms aren't
+    available: in enforced mode an unidentified user is NOT a dispatcher, so a
+    spoofed body ``driver_id`` can never override the token identity
+    (see test_auth_bridge::test_enforced_identity_comes_from_token_not_body)."""
 
     def has_permission(self, request, view):
         if not _auth_required():
@@ -41,7 +43,7 @@ class OverlayDispatcher(BasePermission):
         if getattr(user, "is_superuser", False):
             return True
         perms = getattr(user, "permissions", set())
-        return "car_order:approve" in perms if perms else True
+        return "car_order:approve" in perms
 
 
 def acting_driver_id(request, fallback=None):
@@ -51,3 +53,25 @@ def acting_driver_id(request, fallback=None):
     if user is not None and getattr(user, "is_authenticated", False):
         return user.id
     return fallback
+
+
+def assignee_driver_id(request, view):
+    """The driver an overlay claim / schedule-check is FOR (the assignee) — which is
+    NOT necessarily the caller.
+
+    A DISPATCHER assigning an order to a chosen driver supplies that driver in the
+    body ``driver_id`` → use it. A DRIVER acting on their OWN order derives identity
+    from the token (a spoofed body id is ignored). When overlay auth isn't enforced
+    the body id is trusted (open dev behaviour).
+
+    Without this, ``acting_driver_id`` returns the authenticated DISPATCHER's own id,
+    so a dispatcher-assigned order is silently claimed for the dispatcher instead of
+    the driver.
+    """
+    body = request.data.get("driver_id")
+    if body is not None and OverlayDispatcher().has_permission(request, view):
+        try:
+            return int(body)
+        except (TypeError, ValueError):
+            return body
+    return acting_driver_id(request, body)

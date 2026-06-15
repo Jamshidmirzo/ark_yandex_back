@@ -13,13 +13,13 @@ auto-assign only an IDEAL candidate (on shift, right type, free), urgent now /
 scheduled within the lead window / ASAP after it has waited long enough.
 """
 
-import math
 from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km
 from car_orders.models import DispatchSettings, DriverPosition, DriverShiftState, OrderMeta
 
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
@@ -35,74 +35,6 @@ def auto_enabled():
         return DispatchSettings.load().auto_enabled
     except Exception:
         return False
-
-# A leg longer than this is almost certainly stale/bogus GPS (e.g. a San-Francisco
-# fix vs a Tashkent pickup → an 11 000 km route, a 1.4 MB polyline that overflows
-# the 1 MB WebSocket frame). Skip routing it.
-MAX_LEG_KM = 300
-# Cap the polyline so a single order's geometry never blows the WS frame; 500 points
-# is smooth enough for tracking.
-MAX_GEOM_POINTS = 500
-# Per-frame streamed (trimmed) line — lighter than the full route since it's resent
-# every GPS fix; 160 points is smooth for the «line shrinks as the car moves» effect.
-MAX_STREAM_POINTS = 160
-# Dead-zone (metres): if the car moved less than this since the last SHOWN point it's
-# GPS jitter / standing still — don't move the marker or redraw the line (kills the
-# in-place flicker). >80 m deviation is impossible without crossing this first.
-MIN_MOVE_M = 12
-
-
-def _downsample(geom, n=MAX_GEOM_POINTS):
-    """Thin a polyline to at most ``n`` points (keeps the ends), so the WS frame
-    stays small. OSRM ``overview=full`` can return tens of thousands of points."""
-    if not geom or len(geom) <= n:
-        return geom
-    step = len(geom) / float(n)
-    out = [geom[int(i * step)] for i in range(n)]
-    if out[-1] != geom[-1]:
-        out.append(geom[-1])
-    return out
-
-
-def trim_geometry(geom, lat, lng, max_points=MAX_STREAM_POINTS):
-    """Drop the already-passed part of a route polyline and pin its start to the
-    driver's current point, so the drawn line *shrinks smoothly* as they advance —
-    sent on every GPS fix, NO OSRM call (cheap). `geom` is the canonical route
-    ``[[lng, lat], ...]``; returns a trimmed copy starting at ``(lng, lat)``.
-
-    The caller keeps the canonical route untouched (deviation is still measured
-    against it); this is only the per-frame *view* of the line ahead.
-    """
-    if not geom:
-        return geom
-    # Nearest vertex to the driver = how far along the route they already are.
-    best_i, best_d = 0, float("inf")
-    for i, p in enumerate(geom):
-        if len(p) < 2:
-            continue
-        d = _haversine_km((lat, lng), (p[1], p[0]))
-        if d < best_d:
-            best_d, best_i = d, i
-    ahead = geom[best_i:]
-    if not ahead:
-        return [[lng, lat]]
-    return _downsample([[lng, lat]] + ahead, max_points)
-
-
-def _haversine_km(a, b):
-    """Great-circle distance in km between (lat, lng) tuples."""
-    r = 6371.0
-    p = math.pi / 180
-    lat1, lng1 = a
-    lat2, lng2 = b
-    dlat = (lat2 - lat1) * p
-    dlng = (lng2 - lng1) * p
-    h = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin(dlng / 2) ** 2
-    )
-    return r * 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h))
-
 
 def active_count_by_driver():
     """driver_id → number of active (non-terminal) orders they hold (load cap)."""
@@ -125,7 +57,7 @@ def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1):
     for s in shifts:
         n = load.get(s.driver_id, 0)
         pos = positions.get(s.driver_id)
-        dist = _haversine_km(pos, pickup) if (pos and pickup) else None
+        dist = haversine_km(pos[0], pos[1], pickup[0], pickup[1]) if (pos and pickup) else None
         # car_type_id None on the ORDER = "no specific car required" → any on-shift
         # car fits, so untyped orders still auto-dispatch instead of rotting in the
         # queue forever. A specific requested type must still match the driver's car.
@@ -258,24 +190,12 @@ def order_leg(meta, driver_pos=None):
     if ts == TS.AT_CLIENT:
         return (_start(o), d)
     if ts in (TS.ASSIGNED, TS.TO_CLIENT):
-        # Approach = driver's CURRENT position → pickup. Without a fresh fix we
-        # don't know where they are, so skip (no fake origin→origin line that
-        # looks like the driver is already at the client). The GPS heartbeat
-        # re-pushes the approach once a real position lands.
         if not driver_pos or driver_pos[0] is None:
             return None
         if abs(driver_pos[0] - o[0]) < 1e-6 and abs(driver_pos[1] - o[1]) < 1e-6:
             return None  # already on the pickup point → no line
         return (driver_pos, o)
     return None  # waiting → parked, no moving route
-
-
-def min_dist_km_to_polyline(lat, lng, geom):
-    """Min great-circle distance (km) from a point to a polyline's vertices —
-    a cheap «how far off the route am I» check for re-routing on deviation."""
-    if not geom:
-        return float("inf")
-    return min(_haversine_km((lat, lng), (p[1], p[0])) for p in geom if len(p) >= 2)
 
 
 def push_order_route(meta, driver_pos=None):
@@ -291,10 +211,8 @@ def push_order_route(meta, driver_pos=None):
     if not leg:
         return None
     (slat, slng), (elat, elng) = leg
-    # Bogus-data guard: don't route an absurdly long leg (stale GPS far from the
-    # order's region) — it produces a transcontinental polyline that overflows the
-    # WS frame. The heartbeat re-pushes once a sane fix lands.
-    if _haversine_km((slat, slng), (elat, elng)) > MAX_LEG_KM:
+
+    if haversine_km(slat, slng, elat, elng) > MAX_LEG_KM:
         return None
     from car_orders import services
     from car_orders.models import OrderLiveLocation
@@ -306,7 +224,7 @@ def push_order_route(meta, driver_pos=None):
         geom = None
     if not geom:
         return None
-    geom = _downsample(geom)  # keep the WS frame well under the 1 MB limit
+    geom = downsample(geom)  # keep the WS frame well under the 1 MB limit
     loc, created = OrderLiveLocation.objects.get_or_create(
         order_id=meta.order_id,
         defaults={"lat": slat, "lng": slng, "last_seen": timezone.now(), "geometry": geom},

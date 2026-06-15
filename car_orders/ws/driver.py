@@ -25,12 +25,13 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
     def _moved(self, lat, lng):
         """True if the car moved past the dead-zone since we last sent the line — so
         standing still (GPS jitter) doesn't keep resending/redrawing the same line."""
-        from car_orders.dispatch import MIN_MOVE_M, _haversine_km
+        from car_orders.geometry import MIN_MOVE_M, haversine_km
 
         if self._last_geom_pos is None:
             return True
         try:
-            return _haversine_km((float(lat), float(lng)), self._last_geom_pos) * 1000 >= MIN_MOVE_M
+            plat, plng = self._last_geom_pos
+            return haversine_km(float(lat), float(lng), plat, plng) * 1000 >= MIN_MOVE_M
         except (TypeError, ValueError):
             return True
 
@@ -108,7 +109,7 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
         loc = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
         # Trim the canonical route to the part ahead of the car (pinned to it), so the
         # driver app gets a smooth, shrinking line on every frame — not the full leg.
-        from car_orders.dispatch import trim_geometry
+        from car_orders.geometry import trim_geometry
 
         geom = trim_geometry(loc.geometry, float(lat), float(lng)) if (loc and loc.geometry) else None
         return {

@@ -5,7 +5,7 @@ the driver should go — at every stage, not only once the trip is started."""
 import pytest
 from django.test import override_settings
 
-from car_orders import dispatch
+from car_orders import dispatch, geometry
 from car_orders.models import OrderLiveLocation, OrderMeta
 
 TS = OrderMeta.TripState
@@ -53,8 +53,8 @@ def test_leg_in_trip_reroutes_from_driver_position():
 
 def test_min_dist_to_polyline():
     geom = [[69.20, 41.30], [69.21, 41.305], [69.22, 41.31]]  # [lng,lat]
-    on_route = dispatch.min_dist_km_to_polyline(41.305, 69.21, geom)
-    off_route = dispatch.min_dist_km_to_polyline(41.40, 69.40, geom)
+    on_route = geometry.min_dist_km_to_polyline(41.305, 69.21, geom)
+    off_route = geometry.min_dist_km_to_polyline(41.40, 69.40, geom)
     assert on_route < 0.05  # on the line
     assert off_route > 1.0  # strayed far
 
@@ -102,8 +102,8 @@ def test_push_returns_none_when_parked():
 
 def test_downsample_caps_points():
     big = [[i, i] for i in range(60000)]
-    out = dispatch._downsample(big)
-    assert len(out) <= dispatch.MAX_GEOM_POINTS + 1
+    out = geometry.downsample(big)
+    assert len(out) <= geometry.MAX_GEOM_POINTS + 1
     assert out[0] == big[0] and out[-1] == big[-1]  # ends kept
 
 

@@ -37,7 +37,7 @@ def fleet_live_orders():
         data["last_seen"] = loc.last_seen.isoformat() if loc else None
         # Trim to the part AHEAD of the car (pinned to it) so the line starts at the
         # vehicle, not at the leg's original origin — and stays under the WS frame limit.
-        from car_orders.dispatch import trim_geometry
+        from car_orders.geometry import trim_geometry
 
         data["geometry"] = (
             trim_geometry(loc.geometry, loc.lat, loc.lng)

@@ -24,7 +24,7 @@ from rest_framework.views import APIView
 
 from auth_core.models import AccessGroup, UserAccessGroup
 from auth_core.permissions import HasPermission, user_has_permission
-from car_orders import dispatch, scheduling, services
+from car_orders import dispatch, geometry, scheduling, services
 from car_orders.models import (
     Car,
     CarOrder,
@@ -37,7 +37,12 @@ from car_orders.models import (
     OrderMeta,
     VehicleReport,
 )
-from car_orders.permissions import OverlayAuthenticated, OverlayDispatcher, acting_driver_id
+from car_orders.permissions import (
+    OverlayAuthenticated,
+    OverlayDispatcher,
+    acting_driver_id,
+    assignee_driver_id,
+)
 from car_orders.serializers import (
     CarOrderActivitySerializer,
     CarOrderSerializer,
@@ -54,7 +59,7 @@ from car_orders.serializers import (
     ShiftStartSerializer,
     VehicleReportSerializer,
 )
-from car_orders.ws import broadcast_location, notify_order_status
+from car_orders.ws import broadcast_location
 from config.auth import DemoTokenAuthentication
 
 User = get_user_model()
@@ -73,6 +78,18 @@ def _bad_request(code, message):
     return Response(
         {"error": {"code": code, "message": str(message), "details": {}}},
         status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _service_error_response(exc):
+    """Map a service-layer error (``OrderError`` / ``OverlayError``) onto the standard
+    error response, honouring its code / HTTP-status / details (403 → the shared
+    PERMISSION_DENIED shape)."""
+    if exc.http_status == status.HTTP_403_FORBIDDEN:
+        return _forbidden(exc.message)
+    return Response(
+        {"error": {"code": exc.code, "message": str(exc.message), "details": exc.details}},
+        status=exc.http_status,
     )
 
 
@@ -109,67 +126,16 @@ def admin_approve_overlay(request, pk):
     return resp
 
 
-def _clear_live_location(pk):
-    """Drop the stored live position once an order is done/cancelled/reassigned,
-    so a dead marker doesn't linger on the map or in «Мои заказы»."""
-    OrderLiveLocation.objects.filter(order_id=pk).delete()
-
-
 def _notify_dropped_driver(driver_id, order_id):
-    """Tell the driver an order was taken off them (reassign / release)."""
-    if driver_id is None:
-        return
-    from car_orders.ws import notify_user
-
-    notify_user(
-        driver_id,
-        {
-            "order_id": int(order_id),
-            "trip_state": "cancelled",
-            "message": "Заказ снят с вас / возвращён в очередь",
-        },
-    )
-
-
-def _conflict_payload(order):
-    return {
-        "order_id": order.id,
-        "planned_start": order.planned_datetime,
-        "planned_end": order.planned_end,
-        "address": order.address,
-    }
-
-
-def _time_conflict(order):
-    return Response(
-        {
-            "error": {
-                "code": "TIME_CONFLICT",
-                "message": _("This time window overlaps another of your orders."),
-                "details": _conflict_payload(order),
-            }
-        },
-        status=status.HTTP_409_CONFLICT,
-    )
+    return services.events.notify_dropped_driver(driver_id, order_id)
 
 
 def _reset_driver_shift(driver):
-    """Put a driver's active shift back to ONLINE (e.g. after their trip is
-    cancelled / reassigned out from under them)."""
-    if driver is None:
-        return
-    shift = DriverShift.objects.filter(driver=driver, ended_at__isnull=True).first()
-    if shift and shift.status != DriverShift.Status.ONLINE:
-        shift.status = DriverShift.Status.ONLINE
-        shift.save(update_fields=["status", "updated_at"])
+    return services.shift.reset_driver_shift(driver)
 
 
 def _active_shift(user):
-    return (
-        DriverShift.objects.filter(driver=user, ended_at__isnull=True)
-        .select_related("car", "car__type")
-        .first()
-    )
+    return services.shift.active_shift(user)
 
 
 def _driver_has_active_trip(user):
@@ -313,7 +279,9 @@ class ClaimCheckView(APIView):
     permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        driver_id = acting_driver_id(request, request.data.get("driver_id"))
+        # Check is FOR the candidate driver (dispatcher picks them in the body),
+        # not the dispatcher running the check.
+        driver_id = assignee_driver_id(request, self)
         meta = OrderMeta.objects.filter(order_id=pk).first()
         # No saved window → nothing to schedule against; allow.
         if not meta or not meta.planned_datetime or not meta.estimated_duration:
@@ -359,7 +327,8 @@ class ClaimCheckBatchView(APIView):
     permission_classes = [OverlayAuthenticated]
 
     def post(self, request):
-        driver_id = acting_driver_id(request, request.data.get("driver_id"))
+        # Check is FOR the candidate driver (body), not the dispatcher running it.
+        driver_id = assignee_driver_id(request, self)
         order_ids = request.data.get("order_ids") or []
         metas = {m.order_id: m for m in OrderMeta.objects.filter(order_id__in=order_ids)}
         results = []
@@ -401,203 +370,43 @@ class OverlayClaimView(APIView):
     permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        driver_id = acting_driver_id(request, request.data.get("driver_id"))
-        car_id = request.data.get("car_id")
-        car_label = request.data.get("car_label", "")
-        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-        # Lock the row inside a transaction so two concurrent claims can't both
-        # pass the checks and double-book the order (check-then-act race).
-        with transaction.atomic():
-            meta = OrderMeta.objects.select_for_update().filter(order_id=pk).first()
-            # Already taken by a DIFFERENT driver and still active → reject.
-            if (
-                meta
-                and meta.overlay_claimed
-                and meta.trip_state not in terminal
-                and meta.driver_id is not None
-                and str(meta.driver_id) != str(driver_id)
-            ):
-                return _bad_request(
-                    "ALREADY_CLAIMED", _("This order is already taken by another driver.")
-                )
-            # ONE order at a time: a driver may hold only a SINGLE active
-            # (non-terminal) order — product rule «1 водитель = 1 активный заказ».
-            # Re-claiming the SAME order is fine (idempotent double-tap). Applies to
-            # EVERY path (dispatcher, auto, driver self-claim) and matches the demo
-            # backend, which already forbids a 2nd active order per driver. The
-            # driver becomes available again as soon as the order is completed.
-            busy = (
-                OrderMeta.objects.filter(driver_id=driver_id)
-                .exclude(trip_state__in=terminal)
-                .exclude(order_id=int(pk))
-                .first()
+        # The assignee — a dispatcher assigns to the CHOSEN driver (body), a driver
+        # self-claims their own (token). NOT the acting user, or a dispatcher's
+        # assignment would be claimed for the dispatcher.
+        driver_id = assignee_driver_id(request, self)
+        try:
+            meta = services.overlay.claim(
+                pk, driver_id, request.data.get("car_id"), request.data.get("car_label", "")
             )
-            if busy:
-                return _bad_request(
-                    "DRIVER_BUSY",
-                    _("This driver already has an active order (#%(id)s). Finish it first.")
-                    % {"id": busy.order_id},
-                )
-            # Don't rewind an in-progress trip on a double-tap; only (re)start from a
-            # fresh/terminal state.
-            meta, _created = OrderMeta.objects.update_or_create(
-                order_id=pk,
-                defaults={
-                    "driver_id": driver_id,
-                    "car_id": car_id,
-                    "car_label": car_label,
-                    "overlay_claimed": True,
-                },
-            )
-            if _created or meta.trip_state in terminal:
-                meta.trip_state = OrderMeta.TripState.ASSIGNED
-                meta.returning = False  # start the trip from the first leg again
-                meta.save(update_fields=["trip_state", "returning"])
-        notify_order_status(meta, OrderMeta.TripState.ASSIGNED)  # «Водитель назначен» → author
-        from car_orders import dispatch
-
-        dispatch.push_order_route(meta)  # send the approach route on assignment
+        except services.overlay.OverlayError as exc:
+            return _service_error_response(exc)
         return Response({"ok": True, "conflict": None, "meta": OrderMetaSerializer(meta).data})
-
-
-_TS = OrderMeta.TripState
-# Allowed forward transitions (same-state re-tap and → cancelled are always ok).
-# at_destination → in_trip is the round-trip RETURN leg; completed only from
-# at_destination/waiting.
-_ALLOWED_TRANSITIONS = {
-    _TS.ASSIGNED: {_TS.TO_CLIENT},
-    _TS.TO_CLIENT: {_TS.AT_CLIENT},
-    _TS.AT_CLIENT: {_TS.IN_TRIP},
-    _TS.IN_TRIP: {_TS.AT_DESTINATION, _TS.WAITING},
-    _TS.AT_DESTINATION: {_TS.IN_TRIP, _TS.WAITING, _TS.COMPLETED},
-    _TS.WAITING: {_TS.IN_TRIP, _TS.COMPLETED},
-}
-
-
-def _check_arrival_geofence(meta, state):
-    """The driver may only mark arrival (at_client / at_destination) within
-    ``CAR_ORDER_ARRIVAL_GEOFENCE_M`` of the point AND with a fresh GPS fix. Returns
-    a 400 Response when too far / no fresh fix, else None. 0-radius disables it."""
-    from django.conf import settings
-
-    from car_orders import dispatch
-
-    radius_m = getattr(settings, "CAR_ORDER_ARRIVAL_GEOFENCE_M", 100)
-    if not radius_m:
-        return None
-    if state == OrderMeta.TripState.AT_CLIENT:
-        tgt = (meta.origin_lat, meta.origin_lng)
-    elif meta.returning and meta.return_lat is not None and meta.return_lng is not None:
-        tgt = (meta.return_lat, meta.return_lng)
-    else:
-        tgt = (meta.address_lat, meta.address_lng)
-    if tgt[0] is None or tgt[1] is None:
-        return None  # no target coords → can't enforce
-    pos = DriverPosition.objects.filter(driver_id=meta.driver_id).first()
-    fresh_s = getattr(settings, "CAR_ORDER_GPS_FRESH_S", 120)
-    if pos is None or (timezone.now() - pos.last_seen).total_seconds() > fresh_s:
-        return _bad_request("NO_FRESH_GPS", _("Need a fresh GPS fix to confirm arrival."))
-    dist_m = dispatch._haversine_km((pos.lat, pos.lng), tgt) * 1000
-    if dist_m > radius_m:
-        return _bad_request(
-            "TOO_FAR", _("Too far from the point (%(m)d m) to mark arrival.") % {"m": int(dist_m)}
-        )
-    return None
 
 
 class TripStateView(APIView):
     """Advance the richer trip state (overlay): to_client / at_client / in_trip /
     at_destination / waiting / completed. Authoritative: only the assigned driver
     (or a dispatcher) may advance it, transitions must follow the flow, and arrival
-    stages are geofenced. Updates OrderMeta and pushes the change over WebSocket."""
+    stages are geofenced. Thin HTTP adapter over ``services.trip_state``."""
 
     authentication_classes = [DemoTokenAuthentication]
     permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        state = request.data.get("trip_state")
-        valid = {c for c, _label in OrderMeta.TripState.choices}
-        if state not in valid:
-            return _bad_request("VALIDATION", _("Unknown trip_state."))
-        existing = OrderMeta.objects.filter(order_id=pk).first()
-        if existing is None:
-            return _bad_request("NOT_FOUND", _("No order to advance."))
-        cur = existing.trip_state
-
-        # Only the ASSIGNED driver (or a dispatcher) may advance the trip.
-        actor = acting_driver_id(request)
-        if (
-            existing.driver_id is not None
-            and actor is not None
-            and str(actor) != str(existing.driver_id)
-            and not OverlayDispatcher().has_permission(request, self)
-        ):
-            return _forbidden(_("Only the assigned driver can change this order's stage."))
-
-        if (
-            existing.trip_state == OrderMeta.TripState.COMPLETED
-            and state != OrderMeta.TripState.COMPLETED
-        ):
-            return _bad_request("INVALID_STATUS", _("This order is already completed."))
-
-        # Transitions must follow the flow (same-state re-tap and → cancelled ok).
-        if state not in (cur, OrderMeta.TripState.CANCELLED):
-            if state not in _ALLOWED_TRANSITIONS.get(cur, set()):
-                return _bad_request(
-                    "INVALID_TRANSITION",
-                    _("Cannot go from %(a)s to %(b)s.") % {"a": cur, "b": state},
-                )
-        # Round trip: can't complete before the return leg is done.
-        if state == OrderMeta.TripState.COMPLETED and existing.has_return and not existing.returning:
-            return _bad_request("INVALID_TRANSITION", _("Drive the return leg before completing."))
-        # Geofence the arrival stages.
-        if state in (OrderMeta.TripState.AT_CLIENT, OrderMeta.TripState.AT_DESTINATION):
-            geo_err = _check_arrival_geofence(existing, state)
-            if geo_err is not None:
-                return geo_err
-        # Don't let a driver start DRIVING a 2nd order while already driving one
-        # (one car / one place). A parked driver — on hold during a long shoot
-        # (waiting / at_destination) — is free to take a gap order, so we only
-        # block the transition INTO a moving stage while another is moving.
-        if (
-            existing
-            and existing.driver_id is not None
-            and state in scheduling.MOVING_STATES
-            and existing.trip_state not in scheduling.MOVING_STATES
-        ):
-            other = scheduling.meta_active_trip(
-                existing.driver_id, exclude_order_id=int(pk), states=scheduling.MOVING_STATES
+        try:
+            meta = services.trip_state.advance(
+                int(pk),
+                request.data.get("trip_state"),
+                actor_driver_id=acting_driver_id(request),
+                is_dispatcher=OverlayDispatcher().has_permission(request, self),
             )
-            if other is not None:
-                return _bad_request(
-                    "ACTIVE_TRIP_EXISTS",
-                    _("Finish the current trip before starting another."),
-                )
-        defaults = {"trip_state": state}
-        # Round trip: leaving the destination (at_destination/waiting) back INTO a
-        # moving stage means the driver started the RETURN leg → flip `returning`
-        # so the simulator/map drive destination → return point and «Завершить»
-        # only shows once that leg is done.
-        if (
-            existing
-            and existing.has_return
-            and not existing.returning
-            and state == OrderMeta.TripState.IN_TRIP
-            and existing.trip_state
-            in (OrderMeta.TripState.AT_DESTINATION, OrderMeta.TripState.WAITING)
-        ):
-            defaults["returning"] = True
-        meta, _created = OrderMeta.objects.update_or_create(order_id=pk, defaults=defaults)
-        if state in (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED):
-            _clear_live_location(pk)
-        broadcast_location(pk, {"trip_state": state, "returning": meta.returning})
-        notify_order_status(meta, state)  # toast to driver + requester
-        # Server owns the route: push the geometry for the NEW leg (approach to
-        # pickup / pickup→destination / return), so the map always shows where to go.
-        from car_orders import dispatch
-
-        dispatch.push_order_route(meta)
-        _log_tracking(f"🚦 STATUS [{_src(request)}] #{pk} driver={meta.driver_id} → {state}")
+        except services.trip_state.TripStateError as exc:
+            if exc.http_status == status.HTTP_403_FORBIDDEN:
+                return _forbidden(exc.message)
+            return _bad_request(exc.code, exc.message)
+        _log_tracking(
+            f"🚦 STATUS [{_src(request)}] #{pk} driver={meta.driver_id} → {meta.trip_state}"
+        )
         return Response(OrderMetaSerializer(meta).data)
 
 
@@ -611,30 +420,9 @@ class OverlayReleaseView(APIView):
     permission_classes = [OverlayAuthenticated]
 
     def post(self, request, pk):
-        meta = OrderMeta.objects.filter(order_id=pk).first()
+        meta = services.overlay.release(pk, requeue=bool(request.data.get("requeue")))
         if meta is None:
             return Response({"ok": True})
-        prev_driver = meta.driver_id
-        # `requeue` = the driver returned the order to the queue → keep it alive +
-        # dispatchable (non-terminal) so it's re-assigned. Default (reject / cancel /
-        # done teardown) → terminal CANCELLED.
-        requeue = bool(request.data.get("requeue"))
-        meta.overlay_claimed = False
-        meta.driver_id = None
-        meta.car_id = None
-        meta.car_label = ""
-        meta.returning = False
-        if requeue:
-            meta.trip_state = OrderMeta.TripState.ASSIGNED
-            meta.dispatchable = True
-        else:
-            meta.trip_state = OrderMeta.TripState.CANCELLED
-        meta.save()
-        _clear_live_location(pk)
-        broadcast_location(pk, {"trip_state": "cancelled"})
-        if not requeue:
-            notify_order_status(meta, OrderMeta.TripState.CANCELLED)  # requester
-        _notify_dropped_driver(prev_driver, pk)
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -653,35 +441,11 @@ class ExtendView(APIView):
             minutes = int(request.data.get("minutes", 0))
         except (TypeError, ValueError):
             minutes = 0
-        if minutes <= 0:
-            return _bad_request("VALIDATION", _("`minutes` must be a positive integer."))
-        meta = OrderMeta.objects.filter(order_id=pk).first()
-        if meta is None or not meta.estimated_duration:
-            return _bad_request("VALIDATION", _("No schedule to extend for this order."))
-        meta.estimated_duration += minutes
-        meta.save()
-        conflict = None
-        if meta.driver_id and meta.planned_datetime:
-            new_end = scheduling.driving_end(
-                meta.planned_datetime, meta.planned_end, meta.service_time
-            )
-            conflict = scheduling.meta_conflict(
-                meta.driver_id, meta.planned_datetime, new_end, exclude_order_id=int(pk)
-            )
-        return Response(
-            {
-                "ok": True,
-                "meta": OrderMetaSerializer(meta).data,
-                "conflict": None
-                if conflict is None
-                else {
-                    "order_id": conflict.order_id,
-                    "planned_start": conflict.planned_datetime,
-                    "planned_end": conflict.planned_end,
-                    "address": f"Заказ #{conflict.order_id}",
-                },
-            }
-        )
+        try:
+            meta, conflict = services.overlay.extend(pk, minutes)
+        except services.overlay.OverlayError as exc:
+            return _service_error_response(exc)
+        return Response({"ok": True, "meta": OrderMetaSerializer(meta).data, "conflict": conflict})
 
 
 class ReassignView(APIView):
@@ -695,25 +459,10 @@ class ReassignView(APIView):
     permission_classes = [OverlayDispatcher]
 
     def post(self, request, pk):
-        meta = OrderMeta.objects.filter(order_id=pk).first()
-        if meta is None:
-            return _bad_request("NOT_FOUND", _("Nothing to reassign for this order."))
-        prev_driver = meta.driver_id
-        # Back to the QUEUE, not terminal: drop the driver but keep the order
-        # dispatchable + non-terminal so the auto-dispatcher re-assigns it. (Using
-        # CANCELLED here meant the order was never re-dispatched.)
-        meta.overlay_claimed = False
-        meta.driver_id = None
-        meta.car_id = None
-        meta.car_label = ""
-        meta.returning = False
-        meta.trip_state = OrderMeta.TripState.ASSIGNED  # non-terminal «awaiting» state
-        meta.dispatchable = True
-        meta.save()
-        _clear_live_location(pk)
-        # Tell the watchers the current tracking ended; the driver they were on is gone.
-        broadcast_location(pk, {"trip_state": "cancelled"})
-        _notify_dropped_driver(prev_driver, pk)  # the driver taken off
+        try:
+            meta = services.overlay.reassign(pk)
+        except services.overlay.OverlayError as exc:
+            return _service_error_response(exc)
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
@@ -747,7 +496,7 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
     for meta in metas:
         prev = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
         moved_m = (
-            dispatch._haversine_km((prev.lat, prev.lng), (lat, lng)) * 1000
+            geometry.haversine_km(prev.lat, prev.lng, lat, lng) * 1000
             if (prev and prev.lat is not None)
             else float("inf")
         )
@@ -756,7 +505,7 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
         # the marker and line exactly where they are (don't redraw — that was the
         # in-place flicker), just keep the fix fresh. Compare vs the last shown point
         # (not the last frame) so a slow crawl still accumulates and eventually updates.
-        if prev is not None and moved_m < dispatch.MIN_MOVE_M:
+        if prev is not None and moved_m < geometry.MIN_MOVE_M:
             OrderLiveLocation.objects.filter(order_id=meta.order_id).update(last_seen=now)
             continue
         loc, _ = OrderLiveLocation.objects.update_or_create(
@@ -770,7 +519,7 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
             deviated = (
                 True
                 if not loc.geometry
-                else dispatch.min_dist_km_to_polyline(lat, lng, loc.geometry) > 0.08
+                else geometry.min_dist_km_to_polyline(lat, lng, loc.geometry) > 0.08
             )
             if deviated:
                 dispatch.push_order_route(meta, driver_pos=(lat, lng))
@@ -779,7 +528,7 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
                 # and pin its start to the car. Smooth follow without OSRM per frame.
                 broadcast_location(
                     meta.order_id,
-                    {"geometry": dispatch.trim_geometry(loc.geometry, lat, lng)},
+                    {"geometry": geometry.trim_geometry(loc.geometry, lat, lng)},
                 )
     _log_tracking(
         f"📍 GPS [{src}] driver={driver_id} ({lat:.5f},{lng:.5f}) → "
@@ -1155,182 +904,74 @@ class CarOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="claim")
     def claim(self, request, pk=None):
         """Driver reserves an awaiting order into their schedule (Р1: shift car).
-
-        The order moves to ``scheduled`` (the time window is reserved); the
-        driver starts it later with ``/start/``. A scheduled/in-progress order
-        with a planned window must not overlap another of the driver's windows
-        (plus the travel buffer) — otherwise we return ``TIME_CONFLICT``.
-        """
-        with transaction.atomic():
-            try:
-                order = CarOrder.objects.select_for_update().get(pk=pk)
-            except CarOrder.DoesNotExist:
-                return _bad_request("NOT_FOUND", _("Order not found."))
-            if order.status != CarOrder.Status.AWAITING_DRIVER:
-                return _bad_request("ALREADY_TAKEN", _("This order is no longer available."))
-            shift = _active_shift(request.user)
-            if shift is None:
-                return _bad_request(
-                    "NO_SHIFT", _("Select a car for your shift before accepting orders.")
-                )
-            if order.car_type_id and shift.car.type_id != order.car_type_id:
-                return _bad_request(
-                    "TYPE_MISMATCH", _("Your shift car does not match the requested type.")
-                )
-            window = scheduling.order_window(order)
-            if window:
-                conflict = scheduling.find_time_conflict(request.user, window[0], window[1])
-                if conflict:
-                    return _time_conflict(conflict)
-            order.status = CarOrder.Status.SCHEDULED
-            order.driver = request.user
-            order.car = shift.car
-            order.save(update_fields=["status", "driver", "car", "updated_at"])
-        services.record_accepted(order, request.user)
+        The order moves to ``scheduled``; its window must not overlap another of
+        the driver's (plus the travel buffer), else ``TIME_CONFLICT``."""
+        try:
+            order = services.orders.claim(pk, request.user)
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="start")
     def start(self, request, pk=None):
         """Driver begins a scheduled trip → ``in_progress`` (only one at a time)."""
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        if order.driver_id != request.user.id:
-            return _forbidden(_("Only the assigned driver can start this trip."))
-        if order.status != CarOrder.Status.SCHEDULED:
-            return _bad_request("INVALID_STATUS", _("Only a scheduled order can be started."))
-        active = scheduling.active_trip(request.user, exclude_id=order.pk)
-        if active is not None:
-            return _bad_request(
-                "DRIVER_BUSY", _("Finish your current trip before starting another.")
-            )
-        order.status = CarOrder.Status.IN_PROGRESS
-        order.started_at = timezone.now()
-        order.save(update_fields=["status", "started_at", "updated_at"])
-        shift = _active_shift(request.user)
-        if shift:
-            shift.status = DriverShift.Status.EN_ROUTE
-            shift.save(update_fields=["status", "updated_at"])
+        try:
+            order = services.orders.start(pk, request.user)
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="complete")
     def complete(self, request, pk=None):
-        # Resolve directly (not via the visibility queryset) so a driver who is
-        # not the assignee gets an explicit 403, per ТЗ §5.4 "only_assigned_driver".
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        if order.driver_id != request.user.id:
-            return _forbidden(_("Only the assigned driver can complete this trip."))
-        if order.status != CarOrder.Status.IN_PROGRESS:
-            return _bad_request("INVALID_STATUS", _("Only an in-progress trip can be completed."))
-        order.status = CarOrder.Status.COMPLETED
-        order.finished_at = timezone.now()
-        order.save(update_fields=["status", "finished_at", "updated_at"])
-        shift = _active_shift(request.user)
-        if shift:
-            shift.status = DriverShift.Status.ONLINE
-            shift.save(update_fields=["status", "updated_at"])
-        services.record_completed(order, request.user)
+        """Assigned driver finishes the in-progress trip → ``completed``."""
+        try:
+            order = services.orders.complete(pk, request.user)
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request, pk=None):
         """Dispatcher (or author) cancels an order; frees the driver's window."""
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        terminal = (
-            CarOrder.Status.COMPLETED,
-            CarOrder.Status.REJECTED,
-            CarOrder.Status.CANCELLED,
-        )
-        if order.status in terminal:
-            return _bad_request("INVALID_STATUS", _("This order can no longer be cancelled."))
-        is_author = order.created_by_id == request.user.id
-        can_cancel = user_has_permission(request.user, "car_order:reject")
-        if not (is_author or can_cancel):
-            return _forbidden(_("You cannot cancel this order."))
-        driver = order.driver
-        order.status = CarOrder.Status.CANCELLED
-        order.save(update_fields=["status", "updated_at"])
-        _reset_driver_shift(driver)
-        services.record_cancelled(order, request.user, reason=request.data.get("reason", ""))
+        try:
+            order = services.orders.cancel(pk, request.user, reason=request.data.get("reason", ""))
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="release")
     def release(self, request, pk=None):
         """Assigned driver hands an order back; it returns to ``awaiting_driver``."""
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        if order.driver_id != request.user.id:
-            return _forbidden(_("Only the assigned driver can release this order."))
-        if order.status not in (CarOrder.Status.SCHEDULED, CarOrder.Status.IN_PROGRESS):
-            return _bad_request("INVALID_STATUS", _("This order cannot be released."))
-        driver = order.driver
-        order.status = CarOrder.Status.AWAITING_DRIVER
-        order.driver = None
-        order.car = None
-        order.started_at = None
-        order.save(update_fields=["status", "driver", "car", "started_at", "updated_at"])
-        _reset_driver_shift(driver)
-        services.record_released(order, request.user, reason=request.data.get("reason", ""))
+        try:
+            order = services.orders.release(pk, request.user, reason=request.data.get("reason", ""))
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="reassign")
     def reassign(self, request, pk=None):
         """Dispatcher takes an order off its driver → ``awaiting_driver`` so a new
         car can pick it up (e.g. when the driver can't make the latest start)."""
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        if order.status not in (CarOrder.Status.SCHEDULED, CarOrder.Status.IN_PROGRESS):
-            return _bad_request("INVALID_STATUS", _("This order cannot be reassigned."))
-        from_driver = order.driver
-        order.status = CarOrder.Status.AWAITING_DRIVER
-        order.driver = None
-        order.car = None
-        order.started_at = None
-        order.save(update_fields=["status", "driver", "car", "started_at", "updated_at"])
-        _reset_driver_shift(from_driver)
-        services.record_reassigned(
-            order, request.user, from_driver_id=from_driver.id if from_driver else None
-        )
+        try:
+            order = services.orders.reassign(pk, request.user)
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         return Response(self._read(order))
 
     @action(detail=True, methods=["post"], url_path="extend")
     def extend(self, request, pk=None):
-        """Add minutes to the estimated duration of an active/scheduled order and
-        re-check the driver's next window. Allowed for the driver or a dispatcher."""
-        order = CarOrder.objects.filter(pk=pk).first()
-        if order is None:
-            return _bad_request("NOT_FOUND", _("Order not found."))
-        is_driver = order.driver_id == request.user.id
-        can_manage = user_has_permission(request.user, "car_order:approve")
-        if not (is_driver or can_manage):
-            return _forbidden(_("You cannot extend this order."))
-        if order.status not in (CarOrder.Status.SCHEDULED, CarOrder.Status.IN_PROGRESS):
-            return _bad_request("INVALID_STATUS", _("Only an active order can be extended."))
+        """Add minutes to an active/scheduled order's duration and re-check the
+        driver's next window. Allowed for the driver or a dispatcher."""
         try:
             minutes = int(request.data.get("minutes", 0))
         except (TypeError, ValueError):
             minutes = 0
-        if minutes <= 0:
-            return _bad_request("VALIDATION", _("`minutes` must be a positive integer."))
-        order.estimated_duration = (order.estimated_duration or timedelta()) + timedelta(
-            minutes=minutes
-        )
-        order.save(update_fields=["estimated_duration", "updated_at"])
-        services.record_extended(order, request.user, minutes)
-        conflict = None
-        window = scheduling.order_window(order)
-        if window and order.driver_id:
-            conflict = scheduling.find_time_conflict(
-                order.driver, window[0], window[1], exclude_id=order.pk
-            )
+        try:
+            order, conflict = services.orders.extend(pk, request.user, minutes)
+        except services.orders.OrderError as exc:
+            return _service_error_response(exc)
         data = self._read(order)
-        data["schedule_conflict"] = _conflict_payload(conflict) if conflict else None
+        data["schedule_conflict"] = conflict
         return Response(data)
 
     @action(detail=False, methods=["post"], url_path="estimate")

@@ -43,7 +43,7 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
             return None
         out = {}
         if loc:
-            from car_orders.dispatch import trim_geometry
+            from car_orders.geometry import trim_geometry
 
             # Anchor the line to the car's current position (drop the part behind it),
             # so on connect — even while parked — the route starts AT the vehicle and

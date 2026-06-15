@@ -118,3 +118,60 @@ def test_geofence_disabled_allows_arrival():
     )
     r = _c().post("/api/v1/car-orders/424/trip-state/", {"trip_state": "at_client"}, format="json")
     assert r.status_code == 200, r.content  # no position, but geofence off
+
+
+# ---- Fix: dispatcher's overlay-claim assigns to the CHOSEN driver, not the
+#      acting dispatcher (regression: order silently claimed for the admin) ------
+
+@pytest.mark.django_db
+def test_dispatcher_claim_assigns_to_chosen_driver_not_admin():
+    """An authenticated dispatcher assigns an order to driver #555. The order must
+    land on #555, not on the dispatcher — even though the dispatcher is the caller."""
+    from django.contrib.auth import get_user_model
+
+    admin = get_user_model().objects.create(username="disp-admin", is_superuser=True)
+    OrderMeta.objects.create(
+        order_id=701, dispatchable=True,
+        origin_lat=41.31, origin_lng=69.24, address_lat=41.34, address_lng=69.30,
+    )
+    client = APIClient()
+    client.force_authenticate(admin)  # the caller is the dispatcher, id == admin.id
+    r = client.post(
+        "/api/v1/car-orders/701/overlay-claim/",
+        {"driver_id": 555, "car_id": 1, "car_label": "Cobalt"},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    meta = OrderMeta.objects.get(order_id=701)
+    assert meta.driver_id == 555  # the chosen driver…
+    assert meta.driver_id != admin.id  # …NOT the acting dispatcher
+
+
+@pytest.mark.django_db
+def test_assignee_driver_id_resolution(settings):
+    """Unit-level: dispatcher → body id; driver-with-perms → own token id (a spoofed
+    body id is ignored)."""
+    from car_orders.permissions import assignee_driver_id
+
+    class _Req:
+        def __init__(self, data, user):
+            self.data, self.user = data, user
+
+    class _User:
+        def __init__(self, uid, is_superuser=False, permissions=None):
+            self.id, self.is_authenticated, self.is_superuser = uid, True, is_superuser
+            if permissions is not None:
+                self.permissions = permissions
+
+    # Auth not enforced, but an authenticated dispatcher is the caller → body wins
+    # (this is the exact bug: acting_driver_id would return the dispatcher's id).
+    settings.REQUIRE_OVERLAY_AUTH = False
+    assert assignee_driver_id(_Req({"driver_id": 42}, _User(1)), None) == 42
+
+    # Auth enforced: a non-dispatcher driver can't claim FOR another (body ignored).
+    settings.REQUIRE_OVERLAY_AUTH = True
+    driver = _User(7, permissions={"car_order:create"})  # has perms, lacks approve
+    assert assignee_driver_id(_Req({"driver_id": 99}, driver), None) == 7
+
+    # Auth enforced: a dispatcher (superuser) assigns to the chosen driver.
+    assert assignee_driver_id(_Req({"driver_id": 42}, _User(1, is_superuser=True)), None) == 42

@@ -10,6 +10,10 @@ from car_orders.models import Car, CarType
 
 User = get_user_model()
 
+# Run these against the standalone wiring (the router mounted locally) — see
+# car_orders/tests/urls.py. Without this the gateway proxies CRUD to upstream.
+pytestmark = pytest.mark.urls("car_orders.tests.urls")
+
 
 def _user(username, *groups):
     u = User.objects.create_user(username=username, password="pw")
@@ -21,10 +25,12 @@ def _user(username, *groups):
 
 
 def _client(u):
+    # force_authenticate, not a real login: ``/api/v1/auth/login/`` is proxied to the
+    # upstream demo backend (which doesn't have the test users), and the car-orders
+    # views' DemoTokenAuthentication likewise can't validate a locally-minted token.
+    # Auth/login isn't car_orders' concern — bypass it and exercise the business logic.
     c = APIClient()
-    r = c.post("/api/v1/auth/login/", {"username": u.username, "password": "pw"}, format="json")
-    assert r.status_code == 200, r.content
-    c.credentials(HTTP_AUTHORIZATION="Bearer " + r.data["access"])
+    c.force_authenticate(user=u)
     return c
 
 
