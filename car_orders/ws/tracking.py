@@ -43,14 +43,22 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
             return None
         out = {}
         if loc:
-            from car_orders.dispatch import _downsample
+            from car_orders.dispatch import trim_geometry
 
+            # Anchor the line to the car's current position (drop the part behind it),
+            # so on connect — even while parked — the route starts AT the vehicle and
+            # goes to the target, not from the leg's original origin. Also bounds the frame.
+            geom = (
+                trim_geometry(loc.geometry, loc.lat, loc.lng)
+                if (loc.geometry and loc.lat is not None)
+                else loc.geometry
+            )
             out.update(
                 {
                     "lat": loc.lat,
                     "lng": loc.lng,
                     "last_seen": loc.last_seen.isoformat(),
-                    "geometry": _downsample(loc.geometry),  # bound the WS frame
+                    "geometry": geom,
                 }
             )
         if meta:

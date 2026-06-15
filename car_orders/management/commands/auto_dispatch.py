@@ -42,7 +42,7 @@ class Command(BaseCommand):
         )
 
         while True:
-            if getattr(settings, "AUTO_DISPATCH_ENABLED", True):
+            if dispatch.auto_enabled():
                 try:
                     assigned = dispatch.run_once(
                         first_seen,

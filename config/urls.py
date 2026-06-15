@@ -9,6 +9,7 @@ from django.contrib import admin
 from django.urls import include, path, re_path
 
 from car_orders.views import (
+    AutoDispatchView,
     ClaimCheckBatchView,
     ClaimCheckView,
     admin_approve_overlay,
@@ -51,6 +52,11 @@ urlpatterns = [
         "api/v1/car-orders/drivers/positions/",
         DriverPositionsView.as_view(),
         name="car-order-driver-positions",
+    ),
+    path(
+        "api/v1/car-orders/auto-dispatch/",
+        AutoDispatchView.as_view(),
+        name="car-order-auto-dispatch",
     ),
     path(
         "api/v1/car-orders/drivers/me/shift/",

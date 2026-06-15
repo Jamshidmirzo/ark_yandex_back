@@ -24,11 +24,12 @@ from rest_framework.views import APIView
 
 from auth_core.models import AccessGroup, UserAccessGroup
 from auth_core.permissions import HasPermission, user_has_permission
-from car_orders import scheduling, services
+from car_orders import dispatch, scheduling, services
 from car_orders.models import (
     Car,
     CarOrder,
     CarType,
+    DispatchSettings,
     DriverPosition,
     DriverShift,
     DriverShiftState,
@@ -740,20 +741,32 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
         OrderMeta.TripState.TO_CLIENT,
         OrderMeta.TripState.IN_TRIP,
     )
+    from car_orders import dispatch
+
     updated = []
     for meta in metas:
+        prev = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
+        moved_m = (
+            dispatch._haversine_km((prev.lat, prev.lng), (lat, lng)) * 1000
+            if (prev and prev.lat is not None)
+            else float("inf")
+        )
+        updated.append(meta.order_id)
+        # Parked / GPS jitter: hasn't really moved since the last SHOWN point → keep
+        # the marker and line exactly where they are (don't redraw — that was the
+        # in-place flicker), just keep the fix fresh. Compare vs the last shown point
+        # (not the last frame) so a slow crawl still accumulates and eventually updates.
+        if prev is not None and moved_m < dispatch.MIN_MOVE_M:
+            OrderLiveLocation.objects.filter(order_id=meta.order_id).update(last_seen=now)
+            continue
         loc, _ = OrderLiveLocation.objects.update_or_create(
             order_id=meta.order_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
         )
-        updated.append(meta.order_id)
         broadcast_location(meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()})
         # RE-ROUTE on deviation: recompute the polyline from the LIVE position when
         # there's no route yet OR the driver has strayed >80 m off the current one
         # (turned the «wrong» way) — so it redraws along the road they actually took.
-        # Driving straight along the route → no re-route → no OSRM spam.
         if meta.trip_state in moving:
-            from car_orders import dispatch
-
             deviated = (
                 True
                 if not loc.geometry
@@ -761,6 +774,13 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
             )
             if deviated:
                 dispatch.push_order_route(meta, driver_pos=(lat, lng))
+            elif loc.geometry:
+                # On-route & actually moved: trim the canonical line to what's ahead
+                # and pin its start to the car. Smooth follow without OSRM per frame.
+                broadcast_location(
+                    meta.order_id,
+                    {"geometry": dispatch.trim_geometry(loc.geometry, lat, lng)},
+                )
     _log_tracking(
         f"📍 GPS [{src}] driver={driver_id} ({lat:.5f},{lng:.5f}) → "
         + (
@@ -904,6 +924,55 @@ class DriverShiftsView(APIView):
                 for s in DriverShiftState.objects.all()
             }
         )
+
+
+class AutoDispatchView(APIView):
+    """Runtime on/off switch for the server-side auto-dispatch worker, so the
+    dispatcher can flip auto-assignment from the «Диспетчерская» page.
+
+      GET  → current state (anyone authenticated may read)
+      POST → {"enabled": bool}  set the switch (dispatcher-only)
+
+    `enabled` is the dispatcher toggle; `effective` also factors in the env-var
+    master kill-switch and is what the worker actually obeys."""
+
+    authentication_classes = [DemoTokenAuthentication]
+
+    def get_permissions(self):
+        # Reading the state is fine for any dispatcher tab; flipping it is gated.
+        if self.request.method == "POST":
+            return [OverlayDispatcher()]
+        return [OverlayAuthenticated()]
+
+    def _state(self):
+        from django.conf import settings
+
+        cfg = DispatchSettings.load()
+        return Response(
+            {
+                "enabled": cfg.auto_enabled,
+                "env_enabled": bool(getattr(settings, "AUTO_DISPATCH_ENABLED", True)),
+                "effective": dispatch.auto_enabled(),
+                "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
+                "updated_by": cfg.updated_by,
+            }
+        )
+
+    def get(self, request):
+        return self._state()
+
+    def post(self, request):
+        enabled = request.data.get("enabled")
+        if not isinstance(enabled, bool):
+            return Response(
+                {"detail": "`enabled` (bool) is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        cfg = DispatchSettings.load()
+        cfg.auto_enabled = enabled
+        cfg.updated_by = acting_driver_id(request)
+        cfg.save()
+        return self._state()
 
 
 class DriverPositionsView(APIView):

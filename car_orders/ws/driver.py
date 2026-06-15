@@ -16,10 +16,23 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
-        self._last_geom = None
+        self._last_geom_pos = None  # where we last sent the line (movement dead-zone)
+        self._last_trip_state = None
         self.driver_id = await self._from_payload(self._query())
         await self.accept()
         await self.send_json({"ok": True, "driver_id": self.driver_id})
+
+    def _moved(self, lat, lng):
+        """True if the car moved past the dead-zone since we last sent the line — so
+        standing still (GPS jitter) doesn't keep resending/redrawing the same line."""
+        from car_orders.dispatch import MIN_MOVE_M, _haversine_km
+
+        if self._last_geom_pos is None:
+            return True
+        try:
+            return _haversine_km((float(lat), float(lng)), self._last_geom_pos) * 1000 >= MIN_MOVE_M
+        except (TypeError, ValueError):
+            return True
 
     async def receive_json(self, content, **kwargs):
         if self.driver_id is None:  # identity may arrive in the first message
@@ -39,10 +52,16 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
             "lat": state.get("lat"),
             "lng": state.get("lng"),
         }
+        # Send the (trimmed) line only when it should actually change: the car moved
+        # past the dead-zone, OR the stage changed (new leg). Standing still → keep
+        # the current line, don't resend — that was the in-place flicker/redraw on
+        # GPS jitter. When moving, it's resent every frame → smooth follow.
+        ts = state.get("trip_state")
         geom = state.get("geometry")
-        if geom and geom != self._last_geom:
+        if geom and (ts != self._last_trip_state or self._moved(lat, lng)):
             reply["geometry"] = geom
-            self._last_geom = geom
+            self._last_geom_pos = (float(lat), float(lng))
+        self._last_trip_state = ts
         await self.send_json(reply)
 
     def _query(self):
@@ -87,10 +106,15 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
         if meta is None:
             return {"order_id": None, "lat": float(lat), "lng": float(lng)}
         loc = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
+        # Trim the canonical route to the part ahead of the car (pinned to it), so the
+        # driver app gets a smooth, shrinking line on every frame — not the full leg.
+        from car_orders.dispatch import trim_geometry
+
+        geom = trim_geometry(loc.geometry, float(lat), float(lng)) if (loc and loc.geometry) else None
         return {
             "order_id": meta.order_id,
             "trip_state": meta.trip_state,
             "lat": loc.lat if loc else float(lat),
             "lng": loc.lng if loc else float(lng),
-            "geometry": loc.geometry if loc else None,
+            "geometry": geom,
         }

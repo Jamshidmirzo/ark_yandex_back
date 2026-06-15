@@ -5,9 +5,18 @@ from car_orders.models import (
     CarOrder,
     CarOrderActivity,
     CarType,
+    DispatchSettings,
     DriverShift,
     VehicleReport,
 )
+
+
+@admin.register(DispatchSettings)
+class DispatchSettingsAdmin(admin.ModelAdmin):
+    """Runtime on/off for the auto-dispatch worker (ops-side mirror of the
+    dispatcher's in-app switch)."""
+
+    list_display = ("id", "auto_enabled", "updated_at", "updated_by")
 
 
 @admin.register(CarType)

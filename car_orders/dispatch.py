@@ -16,12 +16,25 @@ scheduled within the lead window / ASAP after it has waited long enough.
 import math
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from car_orders.models import DriverPosition, DriverShiftState, OrderMeta
+from car_orders.models import DispatchSettings, DriverPosition, DriverShiftState, OrderMeta
 
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+
+
+def auto_enabled():
+    """Is auto-dispatch live right now? The env var ``AUTO_DISPATCH_ENABLED`` is the
+    hard ops kill-switch; the dispatcher's runtime toggle (``DispatchSettings``) is
+    the in-app switch. Both must be on. Defaults safe-off if the DB row is missing."""
+    if not getattr(settings, "AUTO_DISPATCH_ENABLED", True):
+        return False
+    try:
+        return DispatchSettings.load().auto_enabled
+    except Exception:
+        return False
 
 # A leg longer than this is almost certainly stale/bogus GPS (e.g. a San-Francisco
 # fix vs a Tashkent pickup → an 11 000 km route, a 1.4 MB polyline that overflows
@@ -30,6 +43,13 @@ MAX_LEG_KM = 300
 # Cap the polyline so a single order's geometry never blows the WS frame; 500 points
 # is smooth enough for tracking.
 MAX_GEOM_POINTS = 500
+# Per-frame streamed (trimmed) line — lighter than the full route since it's resent
+# every GPS fix; 160 points is smooth for the «line shrinks as the car moves» effect.
+MAX_STREAM_POINTS = 160
+# Dead-zone (metres): if the car moved less than this since the last SHOWN point it's
+# GPS jitter / standing still — don't move the marker or redraw the line (kills the
+# in-place flicker). >80 m deviation is impossible without crossing this first.
+MIN_MOVE_M = 12
 
 
 def _downsample(geom, n=MAX_GEOM_POINTS):
@@ -42,6 +62,31 @@ def _downsample(geom, n=MAX_GEOM_POINTS):
     if out[-1] != geom[-1]:
         out.append(geom[-1])
     return out
+
+
+def trim_geometry(geom, lat, lng, max_points=MAX_STREAM_POINTS):
+    """Drop the already-passed part of a route polyline and pin its start to the
+    driver's current point, so the drawn line *shrinks smoothly* as they advance —
+    sent on every GPS fix, NO OSRM call (cheap). `geom` is the canonical route
+    ``[[lng, lat], ...]``; returns a trimmed copy starting at ``(lng, lat)``.
+
+    The caller keeps the canonical route untouched (deviation is still measured
+    against it); this is only the per-frame *view* of the line ahead.
+    """
+    if not geom:
+        return geom
+    # Nearest vertex to the driver = how far along the route they already are.
+    best_i, best_d = 0, float("inf")
+    for i, p in enumerate(geom):
+        if len(p) < 2:
+            continue
+        d = _haversine_km((lat, lng), (p[1], p[0]))
+        if d < best_d:
+            best_d, best_i = d, i
+    ahead = geom[best_i:]
+    if not ahead:
+        return [[lng, lat]]
+    return _downsample([[lng, lat]] + ahead, max_points)
 
 
 def _haversine_km(a, b):
@@ -81,9 +126,10 @@ def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1):
         n = load.get(s.driver_id, 0)
         pos = positions.get(s.driver_id)
         dist = _haversine_km(pos, pickup) if (pos and pickup) else None
-        if car_type_id is None:
-            note = "no-type"
-        elif s.car_type_id != car_type_id:
+        # car_type_id None on the ORDER = "no specific car required" → any on-shift
+        # car fits, so untyped orders still auto-dispatch instead of rotting in the
+        # queue forever. A specific requested type must still match the driver's car.
+        if car_type_id is not None and s.car_type_id != car_type_id:
             note = "wrong-type"
         elif n >= max_load:
             note = "overloaded"

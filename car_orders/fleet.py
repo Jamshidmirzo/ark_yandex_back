@@ -35,9 +35,14 @@ def fleet_live_orders():
         data["lat"] = loc.lat if loc else None
         data["lng"] = loc.lng if loc else None
         data["last_seen"] = loc.last_seen.isoformat() if loc else None
-        # Downsample so the whole-fleet snapshot stays under the 1 MB WS frame limit.
-        from car_orders.dispatch import _downsample
+        # Trim to the part AHEAD of the car (pinned to it) so the line starts at the
+        # vehicle, not at the leg's original origin — and stays under the WS frame limit.
+        from car_orders.dispatch import trim_geometry
 
-        data["geometry"] = _downsample(loc.geometry) if loc else None
+        data["geometry"] = (
+            trim_geometry(loc.geometry, loc.lat, loc.lng)
+            if (loc and loc.geometry and loc.lat is not None)
+            else None
+        )
         out.append(data)
     return out

@@ -48,5 +48,8 @@ if CarOrder.objects.count() == 0:
 print('seed ok | logins: admin/admin12345, dispatcher/dispatcher12345, requester/requester12345, driver/driver12345')
 "
 
-echo "→ gunicorn :8000"
-exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60 --access-logfile -
+# Serve ASGI (HTTP + WebSocket) via daphne — gunicorn/WSGI can't speak WebSocket,
+# and the live map / auto-dispatch push depends on it. HTTP (incl. the gateway)
+# still goes through Django; WS is routed by config/asgi.py.
+echo "→ daphne :8000 (ASGI: HTTP + WebSocket)"
+exec daphne -b 0.0.0.0 -p 8000 config.asgi:application
