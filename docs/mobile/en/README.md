@@ -11,6 +11,7 @@ Per-section docs for integrating a mobile client (Flutter / Kotlin / Swift) with
 5. [Reference](05-reference.md) — statuses, trip_state, error format, pagination.
 6. [WebSockets](06-websockets.md) — **all sockets**: the driver GPS socket, the order socket, fleet, notifications.
 7. [Driver WebSocket](07-driver-websocket.md) — **just for the driver app**: connect, send GPS, receive marker + polyline, Flutter example.
+8. [Dispatcher console](08-dispatcher.md) — **for the web dispatcher**: run topology, fleet live feed (WS + REST), assigning/reassigning, auto-dispatch toggle, live-map contract.
 
 ---
 

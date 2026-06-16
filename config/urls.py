@@ -13,6 +13,7 @@ from car_orders.views import (
     ClaimCheckBatchView,
     ClaimCheckView,
     admin_approve_overlay,
+    reject_overlay,
     DriverLocationView,
     DriverPositionsView,
     DriverShiftView,
@@ -116,6 +117,13 @@ urlpatterns = [
         "api/v1/car-orders/<int:pk>/admin-approve/",
         admin_approve_overlay,
         name="car-order-admin-approve",
+    ),
+    # Hook on demo reject: proxy to demo + tear down OUR overlay (CANCELLED) so a
+    # rejected order leaves the auto-dispatch queue. Before the gateway catch-all.
+    path(
+        "api/v1/car-orders/<int:pk>/reject/",
+        reject_overlay,
+        name="car-order-reject",
     ),
     # Transparent gateway → real DEV backend (demo.ark.glob.uz). Keep last.
     re_path(r"^api/v1/(?P<path>.*)$", gateway, name="gateway"),

@@ -175,3 +175,32 @@ def test_assignee_driver_id_resolution(settings):
 
     # Auth enforced: a dispatcher (superuser) assigns to the chosen driver.
     assert assignee_driver_id(_Req({"driver_id": 42}, _User(1, is_superuser=True)), None) == 42
+
+
+# ---- Fix: rejecting an order tears down OUR overlay so it leaves the queue ------
+
+@pytest.mark.django_db
+def test_reject_hook_releases_overlay(monkeypatch):
+    """A rejected (approved) order must drop out of the auto-dispatch queue, not keep
+    getting auto-assigned. The reject hook proxies to demo, then releases our overlay."""
+    from django.http import HttpResponse
+
+    import config.gateway as gw
+    from car_orders.dispatch import queue_orders
+
+    # Pretend the demo backend accepted the reject (the hook only cleans up on 2xx).
+    monkeypatch.setattr(
+        gw, "gateway", lambda request, path: HttpResponse(b"{}", status=200, content_type="application/json")
+    )
+    OrderMeta.objects.create(
+        order_id=771, dispatchable=True, trip_state=TS.ASSIGNED,
+        origin_lat=41.31, origin_lng=69.24, address_lat=41.34, address_lng=69.30,
+    )
+    assert 771 in [m.order_id for m in queue_orders()]  # in the queue before reject
+
+    r = _c().post("/api/v1/car-orders/771/reject/", {"reason": "не нужен"}, format="json")
+    assert r.status_code == 200, r.content
+
+    m = OrderMeta.objects.get(order_id=771)
+    assert m.trip_state == TS.CANCELLED  # overlay torn down
+    assert 771 not in [x.order_id for x in queue_orders()]  # left the queue

@@ -63,6 +63,18 @@ Response `200` — a **CarOrder**:
   may pick when claiming.
 - Full status list — [05-reference.md](05-reference.md).
 
+> **The detail is proxied to `demo`.** Take the `order_id` for this GET from the list
+> (`GET /car-orders/`) or from "My orders" (`GET /car-orders/drivers/me/overlay-orders/` —
+> [03 §3.8](03-scheduling-overlay.md)); it is the id of a **real demo order**.
+>
+> If the detail returns **`404 NOT_FOUND`** (`No CarOrder matches the given query`), the order no
+> longer exists on `demo` (rejected / pulled / deleted). **Do not surface this as an error**: quietly
+> drop the order from "My orders"/the active screen and refresh the list — otherwise the driver gets
+> stuck on a vanished order (this is exactly how the 404 shows up when an order is rejected or only
+> ever lived in our overlay). Pull live data (position/stage) from our local endpoints
+> (`/live-location/`, `/meta/` — [03](03-scheduling-overlay.md), [04](04-live-tracking.md)), not from
+> the demo detail.
+
 ## Create order
 
 `POST /car-orders/` (permission `car_order:create`)

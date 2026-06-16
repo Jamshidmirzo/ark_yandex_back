@@ -126,6 +126,21 @@ def admin_approve_overlay(request, pk):
     return resp
 
 
+@csrf_exempt
+def reject_overlay(request, pk):
+    """Server hook on demo reject: forward to demo and, on success, tear down OUR
+    overlay (CANCELLED) so a rejected order leaves the auto-dispatch queue and any
+    driver it was on — otherwise an already-approved (``dispatchable=True``) order
+    would keep getting auto-assigned after being rejected. Mirror of
+    ``admin_approve_overlay``; mounted before the gateway catch-all."""
+    from config.gateway import gateway
+
+    resp = gateway(request, f"car-orders/{pk}/reject/")
+    if 200 <= resp.status_code < 300:
+        services.overlay.release(int(pk))  # terminal: clears claim + dispatchable
+    return resp
+
+
 def _notify_dropped_driver(driver_id, order_id):
     return services.events.notify_dropped_driver(driver_id, order_id)
 

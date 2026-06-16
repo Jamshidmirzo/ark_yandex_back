@@ -58,9 +58,6 @@ def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1):
         n = load.get(s.driver_id, 0)
         pos = positions.get(s.driver_id)
         dist = haversine_km(pos[0], pos[1], pickup[0], pickup[1]) if (pos and pickup) else None
-        # car_type_id None on the ORDER = "no specific car required" → any on-shift
-        # car fits, so untyped orders still auto-dispatch instead of rotting in the
-        # queue forever. A specific requested type must still match the driver's car.
         if car_type_id is not None and s.car_type_id != car_type_id:
             note = "wrong-type"
         elif n >= max_load:
