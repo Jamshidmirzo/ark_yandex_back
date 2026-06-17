@@ -12,6 +12,7 @@ cached — the cheap offline fallback is never cached, so a transient OSRM outag
 never pins a straight-line route once the server recovers.
 """
 
+import logging
 import math
 import threading
 import time
@@ -22,7 +23,18 @@ from django.conf import settings
 
 from car_orders import geometry
 
+logger = logging.getLogger(__name__)
+
 _AVG_SPEED_KMH = 30  # city average, used by the offline fallback
+
+# OSRM is retried a couple of times with a short backoff before giving up: the
+# default server is the public demo, which rate-limits / drops connections, and a
+# single hiccup would otherwise collapse the road route to the 2-point straight
+# line that cuts across buildings. Most flaky modes (429, connection reset) fail
+# fast, so retries add little latency; a genuine outage still falls back cleanly.
+_OSRM_TIMEOUT_S = 8  # per attempt
+_OSRM_ATTEMPTS = 2  # total tries against a flaky/rate-limited server
+_OSRM_BACKOFF_S = 0.3  # base backoff, scaled by attempt
 
 # In-process memo of OSRM results: key → (monotonic_ts, result). Process-local
 # (each worker caches independently) — that's fine, it just trims OSRM load.
@@ -85,27 +97,53 @@ def estimate_route(origin_lat, origin_lng, dest_lat, dest_lng):
 
 
 def _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng):
-    """The actual OSRM call + haversine fallback, without the memo layer."""
+    """The actual OSRM call + haversine fallback, without the memo layer.
+
+    Retries a flaky OSRM a couple of times (see ``_OSRM_ATTEMPTS``) before giving
+    up so a single hiccup doesn't collapse the road route to a straight line. Only a
+    genuine failure (or an unconfigured server) falls back; the result's ``source``
+    lets callers keep a known-good route instead of overwriting it with the line."""
     base = getattr(settings, "CAR_ORDER_OSRM_URL", "").rstrip("/")
     coords = f"{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
     if base:
-        try:
-            resp = requests.get(
-                f"{base}/route/v1/driving/{coords}",
-                params={"overview": "full", "geometries": "geojson"},
-                timeout=8,
-            )
-            data = resp.json()
-            if resp.ok and data.get("routes"):
-                route = data["routes"][0]
-                return {
-                    "distance_m": route["distance"],
-                    "duration_s": route["duration"],
-                    "geometry": route["geometry"]["coordinates"],
-                    "source": "osrm",
-                }
-        except (requests.RequestException, ValueError, KeyError, IndexError):
-            pass  # fall through to the offline estimate
+        for attempt in range(_OSRM_ATTEMPTS):
+            try:
+                resp = requests.get(
+                    f"{base}/route/v1/driving/{coords}",
+                    params={"overview": "full", "geometries": "geojson"},
+                    timeout=_OSRM_TIMEOUT_S,
+                )
+                data = resp.json()
+                if resp.ok and data.get("routes"):
+                    route = data["routes"][0]
+                    return {
+                        "distance_m": route["distance"],
+                        "duration_s": route["duration"],
+                        "geometry": route["geometry"]["coordinates"],
+                        "source": "osrm",
+                    }
+                # Server answered but has no route for these points — retrying won't
+                # help, so stop and fall back to the offline estimate.
+                break
+            except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+                if attempt + 1 < _OSRM_ATTEMPTS:
+                    time.sleep(_OSRM_BACKOFF_S * (attempt + 1))
+                    continue
+                logger.warning(
+                    "car_orders: OSRM route failed after %d attempt(s) via %s (%s) — "
+                    "using straight-line fallback",
+                    _OSRM_ATTEMPTS,
+                    base,
+                    exc,
+                )
+    else:
+        # Empty base is a config regression, not an outage: EVERY route becomes a
+        # straight line over buildings. Make it loud, and distinct from the transient
+        # «haversine» tag below, so monitoring can tell a misconfig from a hiccup.
+        logger.warning(
+            "car_orders: CAR_ORDER_OSRM_URL is empty — every route is a straight line; "
+            "set a working OSRM base"
+        )
 
     distance_km = geometry.haversine_km(origin_lat, origin_lng, dest_lat, dest_lng)
     duration_s = distance_km / _AVG_SPEED_KMH * 3600

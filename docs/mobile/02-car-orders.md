@@ -147,6 +147,21 @@ Query-параметры:
 | `PATCH` | `/car-orders/drivers/me/shift/` | выйти на смену / сменить машину |
 | `DELETE` | `/car-orders/drivers/me/shift/` | завершить смену |
 
+**Тело ответа** (`GET` текущей смены и успешный `PATCH`) — форма `DriverShiftState.as_shift()`:
+```json
+{
+  "id": 670,
+  "status": "online",
+  "ended_at": null,
+  "created_at": "2026-06-16T08:00:00+00:00",
+  "car": { "id": 5, "model": "Cobalt", "plate_number": "01A777AA",
+           "type": { "id": 4, "name": "Легковая" } }
+}
+```
+- `id` здесь — это **`driver_id`**, а не первичный ключ строки смены.
+- `ended_at` всегда `null`, пока водитель на смене; завершённая смена не возвращается — `GET` вне смены отдаёт `null`.
+- (Для бэкенда: ответ строит `DriverShiftState.as_shift()`, а **не** `DriverShiftSerializer` — тот висит на непримонтированном роутере `car_orders/urls.py` и под шлюзом мёртв.)
+
 **Выйти на смену** — `PATCH`:
 ```json
 { "driver_id": 670, "car_id": 5, "car_model": "Cobalt", "car_plate": "01A777AA",

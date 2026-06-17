@@ -216,11 +216,21 @@ def push_order_route(meta, driver_pos=None):
     from car_orders.ws import broadcast_location
 
     try:
-        geom = services.estimate_route(slat, slng, elat, elng).get("geometry")
+        result = services.estimate_route(slat, slng, elat, elng)
     except Exception:
-        geom = None
+        result = None
+    geom = result.get("geometry") if result else None
+    source = result.get("source") if result else None
     if not geom:
         return None
+    # A transient OSRM outage falls back to a 2-point straight line (source
+    # «haversine») that cuts across roads/houses. Don't let it overwrite a good road
+    # route that's already on the map — keep the last canonical polyline; the next
+    # successful re-route restores the live line. (When there's no route yet we still
+    # draw the fallback, so the map isn't blank on first assignment.)
+    existing = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
+    if source != "osrm" and existing is not None and existing.geometry:
+        return existing.geometry
     geom = downsample(geom)  # keep the WS frame well under the 1 MB limit
     loc, created = OrderLiveLocation.objects.get_or_create(
         order_id=meta.order_id,
@@ -229,7 +239,7 @@ def push_order_route(meta, driver_pos=None):
     if not created:
         loc.geometry = geom
         loc.save(update_fields=["geometry"])
-    broadcast_location(meta.order_id, {"geometry": geom})
+    broadcast_location(meta.order_id, {"geometry": geom, "source": source})
     return geom
 
 

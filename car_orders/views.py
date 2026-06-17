@@ -177,12 +177,15 @@ def _garage_permissions(action_name):
 
 
 class EstimateView(APIView):
-    """Standalone route/duration estimate, served locally in the gateway setup
-    (no upstream auth needed — it's a pure function of two coordinates). Mounted
-    at /api/v1/car-orders/estimate/ BEFORE the gateway catch-all."""
+    """Standalone route/duration estimate, served locally in the gateway setup.
+    Public (AllowAny): it's a pure function of two coordinates with no upstream
+    auth needed, the mobile create-order card calls it with the no-auth client,
+    and the docs advertise it as auth-free — so it must stay open even when
+    REQUIRE_OVERLAY_AUTH is enabled (unlike the privileged overlay views).
+    Mounted at /api/v1/car-orders/estimate/ BEFORE the gateway catch-all."""
 
-    authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = RouteEstimateSerializer(data=request.data)
@@ -265,7 +268,12 @@ class OrderMetaView(APIView):
     gateway catch-all."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+
+    def get_permissions(self):
+        # Dropping the order from our overlay is a dispatcher/admin action.
+        if self.request.method == "DELETE":
+            return [OverlayDispatcher()]
+        return [OverlayAuthenticated()]
 
     def get(self, request, pk):
         meta = OrderMeta.objects.filter(order_id=pk).first()
@@ -280,6 +288,14 @@ class OrderMetaView(APIView):
             order_id=pk, defaults=serializer.validated_data
         )
         return Response(OrderMetaSerializer(meta).data)
+
+    def delete(self, request, pk):
+        """Admin: drop the order from OUR overlay (the row + its live location) so it
+        disappears from our views. Used by «Удалить» for orders demo won't hard-delete
+        (demo allows deleting only drafts). The demo order itself is untouched."""
+        OrderLiveLocation.objects.filter(order_id=pk).delete()
+        OrderMeta.objects.filter(order_id=pk).delete()
+        return Response({"ok": True})
 
 
 class ClaimCheckView(APIView):
@@ -769,26 +785,45 @@ class DriverPositionsView(APIView):
 
 
 class MyOverlayOrdersView(APIView):
-    """A driver's active orders from our overlay (both demo-claimed and
-    overlay-claimed have driver_id on OrderMeta). Powers the «Мои заказы» page.
-    ``?driver_id=X`` (the frontend passes the logged-in user id)."""
+    """Active orders from our overlay (both demo-claimed and overlay-claimed carry
+    driver_id on OrderMeta). Role-scoped, so it powers BOTH the driver's «Мои
+    заказы» page and an admin/dispatcher board:
+
+      • driver          → only their OWN active orders
+      • admin/dispatcher → the WHOLE active board (optionally narrowed to one
+                           driver via ``?driver_id=X``)
+
+    When auth is enforced the role + driver identity come from the token, so a
+    plain driver's spoofed ``?driver_id=`` can't enumerate another driver's orders
+    (IDOR — see test_auth_bridge). In open dev mode everyone reads as a dispatcher,
+    so the mobile app scopes to itself by passing ``?driver_id=`` while an admin
+    tool omits it to get everything."""
 
     authentication_classes = [DemoTokenAuthentication]
     permission_classes = [OverlayAuthenticated]
 
     def get(self, request):
-        # When auth is enforced, the driver is the token's user — so ?driver_id=
-        # can't enumerate another driver's orders (IDOR).
-        driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
+        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+        qs = OrderMeta.objects.exclude(trip_state__in=terminal)
+        requested = request.query_params.get("driver_id")
+
+        if OverlayDispatcher().has_permission(request, self):
+            # Admin / dispatcher: the whole active board, optionally filtered to one
+            # driver via ?driver_id=.
+            if requested:
+                qs = qs.filter(driver_id=requested)
+            return Response(
+                OrderMetaSerializer(
+                    qs.order_by("planned_datetime", "order_id"), many=True
+                ).data
+            )
+
+        # Driver: only their own. Identity is the token's user when enforced, so a
+        # spoofed ?driver_id= can't enumerate another driver's orders.
+        driver_id = acting_driver_id(request, requested)
         if not driver_id:
             return Response([])
-        qs = (
-            OrderMeta.objects.filter(driver_id=driver_id)
-            .exclude(
-                trip_state__in=(OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-            )
-            .order_by("planned_datetime", "order_id")
-        )
+        qs = qs.filter(driver_id=driver_id).order_by("planned_datetime", "order_id")
         return Response(OrderMetaSerializer(qs, many=True).data)
 
 

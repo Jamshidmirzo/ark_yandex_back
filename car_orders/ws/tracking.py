@@ -1,10 +1,40 @@
 """Downlink (server → client) tracking consumers: the per-order map stream, the
 dispatcher fleet feed, per-user notifications, and a catch-all for foreign paths."""
 
+import logging
+
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 from car_orders.ws.groups import FLEET_GROUP, group_name, user_group
+
+logger = logging.getLogger(__name__)
+
+
+async def _join_group(consumer, group):
+    """Subscribe to a channel group AFTER the socket is accepted, tolerating a
+    transient channel-layer (Redis) outage. ``group_add`` does a real Redis
+    round-trip; when it was called BEFORE ``accept()`` an unreachable Redis raised
+    here and aborted the handshake — the socket dropped with 1011 and the client
+    reconnect-looped for as long as Redis was down. Now we log and keep a live
+    socket instead: the connect replay / snapshot still works, only live fan-out is
+    missed until the client reconnects against a healthy layer."""
+    try:
+        await consumer.channel_layer.group_add(group, consumer.channel_name)
+    except Exception:
+        logger.exception(
+            "car_orders WS: group_add failed for %s — live updates disabled until reconnect",
+            group,
+        )
+
+
+async def _leave_group(consumer, group):
+    """Mirror of :func:`_join_group` for disconnect — a channel-layer outage must
+    never raise out of ``disconnect()`` either."""
+    try:
+        await consumer.channel_layer.group_discard(group, consumer.channel_name)
+    except Exception:
+        logger.exception("car_orders WS: group_discard failed for %s", group)
 
 
 class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
@@ -16,14 +46,14 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         self.order_id = self.scope["url_route"]["kwargs"]["order_id"]
         self.group = group_name(self.order_id)
-        await self.channel_layer.group_add(self.group, self.channel_name)
         await self.accept()
+        await _join_group(self, self.group)
         latest = await self._latest()
         if latest:
             await self.send_json(latest)
 
     async def disconnect(self, code):
-        await self.channel_layer.group_discard(self.group, self.channel_name)
+        await _leave_group(self, self.group)
 
     # Fan-out handler: channel_layer.group_send(..., {"type": "location.update", ...})
     async def location_update(self, event):
@@ -73,12 +103,12 @@ class FleetConsumer(AsyncJsonWebsocketConsumer):
     order_id) as it happens."""
 
     async def connect(self):
-        await self.channel_layer.group_add(FLEET_GROUP, self.channel_name)
         await self.accept()
+        await _join_group(self, FLEET_GROUP)
         await self.send_json({"type": "snapshot", "orders": await self._snapshot()})
 
     async def disconnect(self, code):
-        await self.channel_layer.group_discard(FLEET_GROUP, self.channel_name)
+        await _leave_group(self, FLEET_GROUP)
 
     async def location_update(self, event):
         await self.send_json({"type": "update", **event["data"]})
@@ -96,11 +126,11 @@ class NotificationConsumer(AsyncJsonWebsocketConsumer):
 
     async def connect(self):
         self.uid = self.scope["url_route"]["kwargs"]["user_id"]
-        await self.channel_layer.group_add(user_group(self.uid), self.channel_name)
         await self.accept()
+        await _join_group(self, user_group(self.uid))
 
     async def disconnect(self, code):
-        await self.channel_layer.group_discard(user_group(self.uid), self.channel_name)
+        await _leave_group(self, user_group(self.uid))
 
     async def notify_event(self, event):
         await self.send_json(event["data"])
@@ -113,4 +143,9 @@ class FallbackConsumer(AsyncJsonWebsocketConsumer):
     (re)connect. We just close so the log stays clean."""
 
     async def connect(self):
-        await self.close()
+        # Accept first so we can close with an application code: a pre-accept
+        # ``close()`` rejects the handshake as a bare 1006, which a client can't tell
+        # apart from a transport drop and will reconnect-loop on. 4404 = «this WS path
+        # isn't served here» — a clear signal to stop retrying.
+        await self.accept()
+        await self.close(code=4404)

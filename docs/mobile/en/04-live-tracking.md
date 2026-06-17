@@ -1,14 +1,15 @@
 # 04 — Live tracking: driver position (REST + WebSocket)
 
-**Two directions — different transport (important for mobile):**
-- **Uplink (phone → server): HTTP.** The driver app **sends** its position with a plain
-  `POST /drivers/me/location/` (§4.2). No WebSocket for sending — HTTP survives backgrounding (the OS
-  suspends sockets) and is easy to queue offline.
-- **Downlink (server → dispatcher/requester): WebSocket.** On each HTTP heartbeat the server **fans
-  out** the position in real time to whoever is watching the map (§4.1).
+**Two directions:**
+- **Uplink (phone → server): send GPS.** Two equal ways — pick one:
+  - **WebSocket** — `ws://<host>/ws/driver/track/` (canonical; alias `ws/drivers/me/location/`, see §4.2
+    and [07](07-driver-websocket.md)). Open the socket on shift and stream `{lat,lng}` frames.
+  - **HTTP** — `POST /drivers/me/location/` (§4.3). One point at a time; easy to queue offline.
+  > Both run the exact same server logic (position + order attach + fan-out + route).
+- **Downlink (server → dispatcher/requester): WebSocket.** Having received a position, the server
+  **fans it out** in real time to whoever is watching the order map (§4.1).
 
-So the phone only **posts** GPS; the live map is rendered by the server over WS. Position/route are
-stored in our layer by order id.
+The live map is rendered by the server; position/route are stored in our layer by order id.
 
 ## 4.1 WebSocket (recommended)
 
@@ -69,7 +70,34 @@ ch.stream.listen((raw) {
 });
 ```
 
-## 4.2 REST (fallback)
+## 4.2 Uplink over WebSocket (sending GPS)
+
+`ws://<host>:8000/ws/driver/track/` (canonical; `ws/drivers/me/location/` is a working alias) — a
+**separate** socket for SENDING the position (not to be confused with the order socket in §4.1, which
+is receive-only).
+
+- Identify in the query: `?token=<demo JWT>` (validated like the REST token) **or** `?driver_id=670`
+  (dev fallback). You may also send it as the first JSON message: `{"token":"…"}` / `{"driver_id":670}`.
+- After connect the server sends `{ "ok": true, "driver_id": 670 }`.
+- Then stream the position as frames: `{ "lat": 41.331, "lng": 69.255 }` (every 5–10 s). Each frame is
+  answered with `{ "updated_orders": [88] }`.
+- Does exactly what the HTTP heartbeat does: writes `DriverPosition`, attaches to the driver's active
+  order, fans out over WS to watchers, and (re)computes the "to client" approach route.
+- Lang-prefix is fine: `ws://host/ru/ws/driver/track/` also routes.
+
+```dart
+final up = WebSocketChannel.connect(
+  Uri.parse('ws://$host:8000/ws/driver/track/?token=$jwt'));
+// on every geolocation fix:
+up.sink.add(jsonEncode({'lat': pos.latitude, 'lng': pos.longitude}));
+```
+
+> No connection → buffer fixes and flush when the socket recovers (reconnect with backoff). The HTTP
+> alternative below (§4.3 REST) has identical server logic; pick ONE, don't duplicate.
+
+---
+
+## 4.3 REST (fallback)
 
 ### Get position
 `GET /car-orders/{id}/live-location/` → `null` or:
@@ -99,8 +127,8 @@ Poll every 3 s if you don’t use the WebSocket.
 **Background & offline (mobile guidance):**
 - On shift, start background location (native background-location / `watchPosition`), ~5–10 s or by
   significant change. Stop when off shift.
-- No network (tunnel, dead zone) → **queue the POSTs** and flush when connectivity returns. This is
-  exactly why the uplink is HTTP, not a socket.
+- No network (tunnel, dead zone) → **queue the POSTs** and flush when connectivity returns. For this
+  case the HTTP uplink is handy (easy to queue); the socket uplink (§4.2) is an equal alternative.
 
 > **Reading fleet positions (for the dispatcher client, not the driver):**
 > `GET /car-orders/drivers/positions/?max_age=180` → `{ "671": {lat,lng,last_seen}, ... }` — the
@@ -121,7 +149,7 @@ If the order has `meta` with A→B coordinates, the route is computed automatica
 [03](03-scheduling-overlay.md) → `estimate`). With no coordinates, tracking shows only the driver
 dot without a line. So **save the coordinates to `meta`** when creating the order.
 
-## 4.3 Simulator (testing without a phone)
+## 4.4 Simulator (testing without a phone)
 > **Off by default (updated 2026-06):** real phones stream GPS to `/drivers/me/location/`, and the
 > simulator would conflict with them. To run it for testing **without a phone** — set
 > `AUTO_SIMULATE_ENABLED=1` or pass the `--force` flag. Do not run it against real drivers.

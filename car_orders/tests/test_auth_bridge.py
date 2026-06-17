@@ -86,6 +86,49 @@ def test_enforced_my_orders_ignores_query_driver_id(monkeypatch):
 
 @override_settings(REQUIRE_OVERLAY_AUTH=True)
 @pytest.mark.django_db
+def test_admin_overlay_orders_sees_the_whole_board(monkeypatch):
+    """A dispatcher (car_order:approve) gets EVERY active order, not just their own
+    — while a plain driver only ever sees their own (covered above)."""
+    OrderMeta.objects.create(order_id=810, driver_id=42, trip_state=OrderMeta.TripState.ASSIGNED)
+    OrderMeta.objects.create(order_id=811, driver_id=99, trip_state=OrderMeta.TripState.IN_TRIP)
+    # Terminal orders never show on the active board.
+    OrderMeta.objects.create(order_id=812, driver_id=99, trip_state=OrderMeta.TripState.COMPLETED)
+    client = _auth_as(monkeypatch, 1, perms=["car_order:approve"])
+    r = client.get("/api/v1/car-orders/drivers/me/overlay-orders/")
+    assert r.status_code == 200
+    assert sorted(o["order_id"] for o in r.json()) == [810, 811]
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+@pytest.mark.parametrize("perm", ["administrator", "car_order:approve_all"])
+def test_admin_overlay_orders_honours_permission_hierarchy(monkeypatch, perm):
+    """A user who satisfies car_order:approve via the ARK hierarchy (administrator
+    or car_order:approve_all) is a dispatcher too — same expansion the web client
+    uses — so they get the whole board, not just their own (empty) list."""
+    OrderMeta.objects.create(order_id=830, driver_id=42, trip_state=OrderMeta.TripState.ASSIGNED)
+    OrderMeta.objects.create(order_id=831, driver_id=99, trip_state=OrderMeta.TripState.IN_TRIP)
+    client = _auth_as(monkeypatch, 1, perms=[perm])
+    r = client.get("/api/v1/car-orders/drivers/me/overlay-orders/")
+    assert r.status_code == 200
+    assert sorted(o["order_id"] for o in r.json()) == [830, 831]
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+def test_admin_overlay_orders_can_filter_to_one_driver(monkeypatch):
+    """An admin may narrow the board to a single driver via ?driver_id= (a power a
+    plain driver doesn't get — for them the param is ignored)."""
+    OrderMeta.objects.create(order_id=820, driver_id=42, trip_state=OrderMeta.TripState.ASSIGNED)
+    OrderMeta.objects.create(order_id=821, driver_id=99, trip_state=OrderMeta.TripState.IN_TRIP)
+    client = _auth_as(monkeypatch, 1, perms=["car_order:approve"])
+    r = client.get("/api/v1/car-orders/drivers/me/overlay-orders/?driver_id=99")
+    assert r.status_code == 200
+    assert [o["order_id"] for o in r.json()] == [821]
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
 def test_live_location_stays_open_for_the_simulator(monkeypatch):
     # No token at all — the simulator pushes here without one.
     client = APIClient()

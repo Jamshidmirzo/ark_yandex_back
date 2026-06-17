@@ -9,6 +9,8 @@ the request body.
 from django.conf import settings
 from rest_framework.permissions import BasePermission
 
+from auth_core.permissions import expand_permission_codename
+
 
 def _auth_required():
     return getattr(settings, "REQUIRE_OVERLAY_AUTH", False)
@@ -43,7 +45,12 @@ class OverlayDispatcher(BasePermission):
         if getattr(user, "is_superuser", False):
             return True
         perms = getattr(user, "permissions", set())
-        return "car_order:approve" in perms
+        # Apply the ARK permission hierarchy the rest of the app and the web client
+        # use (administrator ⊇ everything, X_all ⊇ X), so an `administrator` /
+        # `car_order:approve_all` holder counts as a dispatcher too — matching
+        # useMyPermissions on the frontend. DemoUser carries an in-memory perms set,
+        # so expand against it rather than the DB-backed user_has_permission.
+        return bool(expand_permission_codename("car_order:approve") & set(perms))
 
 
 def acting_driver_id(request, fallback=None):

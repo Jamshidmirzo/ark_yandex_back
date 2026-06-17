@@ -10,4 +10,9 @@ gunicorn>=23.0,<24.0
 channels==4.3.2
 # Prod WebSocket layer (multi-process / durable); activated by REDIS_URL.
 channels_redis>=4.2,<5.0
+# Pin redis-py: channels_redis 4.x declares only `redis>=4.6` (no upper bound), so it
+# floats to redis-py 8.x, which defaults to the RESP3 protocol that channels_redis 4.x
+# mishandles — the channel-layer read then times out ("Timeout reading from …:6379")
+# and kills every WebSocket consumer (connect→disconnect loop). 5.0.x defaults to RESP2.
+redis>=5.0,<5.1
 daphne==4.2.2

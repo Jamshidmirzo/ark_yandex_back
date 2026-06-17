@@ -136,3 +136,44 @@ Rules (may return an error):
 ```
 Use it for the claim car-picker. `is_available: false` = the car is currently busy on an active
 order.
+
+## Driver’s shift (required for auto-dispatch)
+
+To receive orders, a driver must **go on shift** — otherwise the auto-dispatcher doesn’t see them
+(no candidate for the car type).
+
+| Method | Path | Effect |
+|---|---|---|
+| `GET` | `/car-orders/drivers/me/shift/` | current shift or `null` |
+| `PATCH` | `/car-orders/drivers/me/shift/` | go on shift / swap car |
+| `DELETE` | `/car-orders/drivers/me/shift/` | end shift |
+
+**Response body** (`GET` of the current shift and a successful `PATCH`) — the `DriverShiftState.as_shift()` shape:
+```json
+{
+  "id": 670,
+  "status": "online",
+  "ended_at": null,
+  "created_at": "2026-06-16T08:00:00+00:00",
+  "car": { "id": 5, "model": "Cobalt", "plate_number": "01A777AA",
+           "type": { "id": 4, "name": "Легковая" } }
+}
+```
+- `id` here is the **`driver_id`**, not the shift row’s primary key.
+- `ended_at` is always `null` while on shift; an ended shift is not returned — `GET` off shift returns `null`.
+- (For the backend: the response is built by `DriverShiftState.as_shift()`, **not** `DriverShiftSerializer` — that one hangs off the unmounted `car_orders/urls.py` router and is dead under the gateway.)
+
+**Go on shift** — `PATCH`:
+```json
+{ "driver_id": 670, "car_id": 5, "car_model": "Cobalt", "car_plate": "01A777AA",
+  "car_type_id": 4, "car_type_name": "Легковая" }
+```
+- **`car_type_id` is required** (`400 VALIDATION` without it) — the dispatcher matches orders by it.
+- Identification is by token; `driver_id` in the body is a dev fallback.
+- **Swap car** = the same `PATCH` with a different `car_id`. Blocked (`400 HAS_ACTIVE_ORDERS`) while there
+  are active orders — finish them first.
+
+**End shift** — `DELETE` (with `?driver_id=` in dev). Blocked (`400 HAS_ACTIVE_ORDERS`) while an order is
+active — you can’t abandon an order.
+
+After going on shift + streaming GPS, orders arrive auto-assigned in `/drivers/me/overlay-orders/`.

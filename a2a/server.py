@@ -27,6 +27,7 @@ Run (from this repo root, in the a2a venv — see a2a/README.md):
 import argparse
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,12 +90,18 @@ async def ask_claude_about_codebase(question: str, project_root: Path) -> str:
 
     try:
         process = await asyncio.create_subprocess_exec(
-            "claude", "--print", question,
+            # Answer with Sonnet, not the default (Opus): far faster, so a codebase
+            # question returns before the bridge's ~120s client timeout. Override
+            # via A2A_QUESTION_MODEL if you want haiku (faster) or opus (smarter).
+            "claude", "--print", "--model", os.environ.get("A2A_QUESTION_MODEL", "sonnet"),
+            question,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(project_root),
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        # Just under the bridge's 120s, so on a slow answer we return a clean
+        # "timed out" message instead of the bridge killing the connection.
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=110)
 
         if process.returncode == 0 and stdout:
             answer = stdout.decode().strip()
@@ -106,7 +113,7 @@ async def ask_claude_about_codebase(question: str, project_root: Path) -> str:
             return f"Claude Code could not answer (exit {process.returncode}): {err}"
 
     except asyncio.TimeoutError:
-        return "Claude Code timed out after 120 seconds. The question may be too complex."
+        return "Claude Code timed out after 110 seconds. Ask a narrower question, or set A2A_QUESTION_MODEL=haiku for a faster answer."
     except FileNotFoundError:
         return (
             "Claude Code CLI not found. Make sure `claude` is installed and in PATH.\n"

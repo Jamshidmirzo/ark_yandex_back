@@ -12,6 +12,30 @@ from car_orders.serializers import OrderMetaSerializer
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
 
 
+def _planned_geometry(meta):
+    """The pickup → destination route for an order with no live position YET — so the
+    dispatcher sees where it should go even before a driver is assigned or departs
+    (a driverless awaiting order has no OrderLiveLocation, hence no live geometry).
+
+    The server owns the route here too, mirroring ``dispatch.push_order_route``.
+    Returns a downsampled GeoJSON ``[lng, lat]`` polyline, or None when the order
+    has no pickup/destination coords or the leg is implausibly long."""
+    from car_orders import services
+    from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km
+
+    o_lat, o_lng = meta.origin_lat, meta.origin_lng
+    d_lat, d_lng = meta.address_lat, meta.address_lng
+    if None in (o_lat, o_lng, d_lat, d_lng):
+        return None
+    if haversine_km(o_lat, o_lng, d_lat, d_lng) > MAX_LEG_KM:
+        return None
+    try:
+        geom = services.estimate_route(o_lat, o_lng, d_lat, d_lng).get("geometry")
+    except Exception:
+        geom = None
+    return downsample(geom) if geom else None
+
+
 def fleet_live_orders():
     # Every non-terminal overlay order, INCLUDING ones still awaiting a driver
     # (driver_id is None) — the dispatcher needs to see those to assign them.
@@ -35,14 +59,16 @@ def fleet_live_orders():
         data["lat"] = loc.lat if loc else None
         data["lng"] = loc.lng if loc else None
         data["last_seen"] = loc.last_seen.isoformat() if loc else None
-        # Trim to the part AHEAD of the car (pinned to it) so the line starts at the
-        # vehicle, not at the leg's original origin — and stays under the WS frame limit.
         from car_orders.geometry import trim_geometry
 
-        data["geometry"] = (
-            trim_geometry(loc.geometry, loc.lat, loc.lng)
-            if (loc and loc.geometry and loc.lat is not None)
-            else None
-        )
+        if loc and loc.geometry and loc.lat is not None:
+            # Live, moving leg: trim to the part AHEAD of the car (pinned to it) so the
+            # line starts at the vehicle, not the leg's origin — and stays under the WS
+            # frame limit.
+            data["geometry"] = trim_geometry(loc.geometry, loc.lat, loc.lng)
+        else:
+            # No live position yet (awaiting / not departed): show the planned
+            # pickup → destination route so the dispatcher sees where it should go.
+            data["geometry"] = _planned_geometry(m)
         out.append(data)
     return out

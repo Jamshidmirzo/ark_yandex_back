@@ -230,6 +230,43 @@ def test_fleet_live_lists_active_orders_with_positions():
 
 
 @pytest.mark.django_db
+def test_fleet_live_gives_driverless_order_its_planned_route():
+    """A driverless awaiting order has no live position, but the snapshot still
+    carries the pickup → destination route so the dispatcher sees where it should
+    go even before a driver is assigned."""
+    OrderMeta.objects.create(
+        order_id=802,
+        driver_id=None,
+        dispatchable=True,
+        trip_state=OrderMeta.TripState.ASSIGNED,
+        origin_lat=41.30, origin_lng=69.20,
+        address_lat=41.31, address_lng=69.24,
+    )
+    data = APIClient().get("/api/v1/car-orders/fleet/live/").json()
+    row = next(o for o in data["orders"] if o["order_id"] == 802)
+    assert row["driver_id"] is None
+    assert row["lat"] is None  # no live position yet
+    # Planned A→B route present (GeoJSON [lng, lat]); endpoints near pickup/destination
+    # (loose tolerance absorbs OSRM snapping the points to the nearest road).
+    geom = row["geometry"]
+    assert geom and len(geom) >= 2
+    assert geom[0][0] == pytest.approx(69.20, abs=0.05)  # starts at the pickup
+    assert geom[-1][0] == pytest.approx(69.24, abs=0.05)  # ends at the destination
+
+
+@pytest.mark.django_db
+def test_fleet_live_no_route_without_destination():
+    """No destination coords → no planned route (nothing to draw), order still listed."""
+    OrderMeta.objects.create(
+        order_id=803, driver_id=None, dispatchable=True,
+        trip_state=OrderMeta.TripState.ASSIGNED, origin_lat=41.30, origin_lng=69.20,
+    )
+    data = APIClient().get("/api/v1/car-orders/fleet/live/").json()
+    row = next(o for o in data["orders"] if o["order_id"] == 803)
+    assert row["geometry"] is None
+
+
+@pytest.mark.django_db
 def test_can_start_gap_order_while_parked_at_a_shoot():
     """During a long shoot the driver is on hold (waiting/at_destination) — they
     CAN start a second «gap» order; only actively driving blocks a new trip."""

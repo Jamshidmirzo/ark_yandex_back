@@ -240,10 +240,13 @@ for the driver or a dispatcher. `400 VALIDATION` — `minutes` not positive, or 
 window.
 
 `POST /car-orders/{id}/reassign/` (no body) → `{ "ok": true, "meta": {...} }`
-A dispatcher takes the order off its driver and returns it to the queue (same as `overlay-release`, but
-it's the **dispatcher's** action): `overlay_claimed=false`, `driver_id=null`, `trip_state=cancelled`,
-pushes `cancelled` over WS — the order is available to another driver again. Works for overlay-claimed
-orders (a demo claim is owned by demo and can't be reassigned from here). `400 NOT_FOUND` — no meta.
+A dispatcher takes the order off its current driver and **returns it to the queue** for auto-dispatch:
+`overlay_claimed=false`, `driver_id=null`, `dispatchable=true`, and `meta.trip_state` **in the response**
+= **`assigned`** (a non-terminal “awaiting” state) — unlike `overlay-release`, which sets the terminal
+`cancelled`. A `trip_state: "cancelled"` frame is still pushed over WS — it only tells current watchers
+that the previous tracking ended (the driver was removed); the order itself is available to the
+auto-dispatcher again. Works for overlay-claimed orders (a demo claim is owned by demo and can't be
+reassigned from here). `400 NOT_FOUND` — no meta.
 
 ---
 
