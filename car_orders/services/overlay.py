@@ -131,9 +131,12 @@ def extend(order_id, minutes):
     if minutes <= 0:
         raise OverlayError("VALIDATION", _("`minutes` must be a positive integer."))
     meta = OrderMeta.objects.filter(order_id=order_id).first()
-    if meta is None or not meta.estimated_duration:
-        raise OverlayError("VALIDATION", _("No schedule to extend for this order."))
-    meta.estimated_duration += minutes
+    if meta is None:
+        raise OverlayError("VALIDATION", _("No order to extend."))
+    # An order created without a route estimate has no duration yet — treat a
+    # missing duration as 0 so «продлить» still works (it establishes / pushes the
+    # window out) instead of 400-ing on every freshly-created order.
+    meta.estimated_duration = (meta.estimated_duration or 0) + minutes
     meta.save()
     conflict = None
     if meta.driver_id and meta.planned_datetime:

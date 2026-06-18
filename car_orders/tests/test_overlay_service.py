@@ -110,3 +110,20 @@ def test_extend_rejects_nonpositive_minutes():
     with pytest.raises(overlay.OverlayError) as exc:
         overlay.extend(900, 0)
     assert exc.value.code == "VALIDATION"
+
+
+@pytest.mark.django_db
+def test_extend_with_no_prior_duration_starts_from_zero():
+    # A freshly-created order has no estimated_duration — «продлить» must still
+    # work, establishing the window from 0 rather than 400-ing.
+    _meta(900)
+    meta, conflict = overlay.extend(900, 15)
+    assert meta.estimated_duration == 15
+    assert conflict is None
+
+
+@pytest.mark.django_db
+def test_extend_rejects_missing_order():
+    with pytest.raises(overlay.OverlayError) as exc:
+        overlay.extend(999, 15)
+    assert exc.value.code == "VALIDATION"
