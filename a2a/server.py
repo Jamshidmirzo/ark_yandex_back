@@ -88,6 +88,11 @@ async def ask_claude_about_codebase(question: str, project_root: Path) -> str:
     print(f"\n🤖  Flutter Claude asks: {question}")
     print(f"    Running Claude Code in: {project_root}")
 
+    # Max wait for `claude --print`. MUST stay <= the bridge's A2A_REQUEST_TIMEOUT_MS
+    # AND the client's .mcp.json `timeout`, or those cut the connection first. To
+    # allow longer answers, raise ALL THREE together (env here + both on the client).
+    timeout_s = int(os.environ.get("A2A_QUESTION_TIMEOUT_S", "300"))
+
     try:
         process = await asyncio.create_subprocess_exec(
             # Answer with Sonnet, not the default (Opus): far faster, so a codebase
@@ -99,9 +104,7 @@ async def ask_claude_about_codebase(question: str, project_root: Path) -> str:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(project_root),
         )
-        # Just under the bridge's 120s, so on a slow answer we return a clean
-        # "timed out" message instead of the bridge killing the connection.
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=110)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
 
         if process.returncode == 0 and stdout:
             answer = stdout.decode().strip()
@@ -113,7 +116,11 @@ async def ask_claude_about_codebase(question: str, project_root: Path) -> str:
             return f"Claude Code could not answer (exit {process.returncode}): {err}"
 
     except asyncio.TimeoutError:
-        return "Claude Code timed out after 110 seconds. Ask a narrower question, or set A2A_QUESTION_MODEL=haiku for a faster answer."
+        return (
+            f"Claude Code timed out after {timeout_s}s. Ask a narrower question, "
+            "raise A2A_QUESTION_TIMEOUT_S (and the client timeouts), or set "
+            "A2A_QUESTION_MODEL=haiku for a faster answer."
+        )
     except FileNotFoundError:
         return (
             "Claude Code CLI not found. Make sure `claude` is installed and in PATH.\n"

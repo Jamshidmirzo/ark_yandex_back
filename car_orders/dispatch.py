@@ -13,6 +13,7 @@ auto-assign only an IDEAL candidate (on shift, right type, free), urgent now /
 scheduled within the lead window / ASAP after it has waited long enough.
 """
 
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -21,6 +22,8 @@ from django.utils import timezone
 
 from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km
 from car_orders.models import DispatchSettings, DriverPosition, DriverShiftState, OrderMeta
+
+logger = logging.getLogger(__name__)
 
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
 
@@ -34,6 +37,9 @@ def auto_enabled():
     try:
         return DispatchSettings.load().auto_enabled
     except Exception:
+        # AUDIT M1: don't let a real DB error masquerade as «auto-dispatch off» — fail
+        # safe-off (the worker must keep running) but LOG it so the outage is visible.
+        logger.exception("car_orders: auto_enabled() check failed — defaulting to OFF")
         return False
 
 def active_count_by_driver():
@@ -90,9 +96,13 @@ def claim(order_id, driver_id, car_id, car_label):
     """Assign an order to a driver in our overlay — the worker's equivalent of
     overlay-claim, with the same «1 водитель = 1 активный заказ» guard. Returns
     True on success, False if the order is already taken or the driver is busy."""
+    from car_orders import concurrency
     from car_orders.ws import notify_order_status
 
     with transaction.atomic():
+        # Serialise concurrent claims for THIS driver (worker vs API, two passes) so
+        # the «busy?» check below can't race two orders onto one driver — AUDIT C1.
+        concurrency.lock_driver(driver_id)
         meta = OrderMeta.objects.select_for_update().filter(order_id=order_id).first()
         if meta is None:
             return False
@@ -279,7 +289,10 @@ def run_once(first_seen, now=None, *, lead_min, stale_sec, pos_max_age, max_load
     load = active_count_by_driver()
     assigned = []
     for meta in queue_orders():
-        first_seen.setdefault(meta.order_id, now)
+        # AUDIT M6: seed «first seen» from the order's persisted updated_at (≈ when it
+        # entered the queue) rather than `now`, so a worker restart doesn't reset every
+        # ASAP order's stale clock and indefinitely defer its dispatch.
+        first_seen.setdefault(meta.order_id, meta.updated_at or now)
         if not is_due(meta, first_seen, now, lead_min, stale_sec):
             continue
         ranked = rank_drivers(

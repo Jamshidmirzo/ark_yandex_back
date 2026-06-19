@@ -9,7 +9,7 @@ from django.test import override_settings
 from rest_framework.test import APIClient
 
 import config.auth as demo_auth
-from car_orders.models import OrderMeta
+from car_orders.models import OrderLiveLocation, OrderMeta
 
 
 class _Resp:
@@ -127,12 +127,64 @@ def test_admin_overlay_orders_can_filter_to_one_driver(monkeypatch):
     assert [o["order_id"] for o in r.json()] == [821]
 
 
-@override_settings(REQUIRE_OVERLAY_AUTH=True)
 @pytest.mark.django_db
-def test_live_location_stays_open_for_the_simulator(monkeypatch):
-    # No token at all — the simulator pushes here without one.
+def test_live_location_open_for_simulator_in_dev():
+    # Default dev posture (REQUIRE_OVERLAY_AUTH off): the simulator pushes without a token.
     client = APIClient()
     r = client.post(
         "/api/v1/car-orders/730/live-location/", {"lat": 41.3, "lng": 69.2}, format="json"
     )
     assert r.status_code == 200, r.content
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+def test_live_location_write_rejects_anonymous_when_enforced():
+    # AUDIT C3 fix: an unauthenticated caller can no longer write any order's position.
+    client = APIClient()
+    r = client.post(
+        "/api/v1/car-orders/730/live-location/", {"lat": 41.3, "lng": 69.2}, format="json"
+    )
+    assert r.status_code in (401, 403)
+    assert not OrderLiveLocation.objects.filter(order_id=730).exists()  # nothing written
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+def test_live_location_write_allowed_for_owning_driver_when_enforced(monkeypatch):
+    OrderMeta.objects.create(
+        order_id=732, driver_id=671, trip_state=OrderMeta.TripState.ASSIGNED
+    )
+    client = _auth_as(monkeypatch, 671)  # the order's assigned driver
+    r = client.post(
+        "/api/v1/car-orders/732/live-location/", {"lat": 41.3, "lng": 69.2}, format="json"
+    )
+    assert r.status_code == 200, r.content
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+def test_meta_post_strips_assignment_fields_for_non_dispatcher(monkeypatch):
+    # AUDIT C3/M2 fix: a non-dispatcher can't self-assign a driver / flip dispatchable
+    # via the feature-overlay upsert. The coords still save; the privileged fields drop.
+    client = _auth_as(monkeypatch, 5)  # plain authenticated user, no perms
+    r = client.post(
+        "/api/v1/car-orders/740/meta/",
+        {"origin_lat": 41.3, "origin_lng": 69.2, "driver_id": 999, "dispatchable": True},
+        format="json",
+    )
+    assert r.status_code == 200, r.content
+    meta = OrderMeta.objects.get(order_id=740)
+    assert meta.origin_lat == 41.3  # benign field saved
+    assert meta.driver_id is None and meta.dispatchable is False  # privileged fields ignored
+
+
+@override_settings(REQUIRE_OVERLAY_AUTH=True)
+@pytest.mark.django_db
+def test_meta_post_allows_dispatcher_to_set_assignment(monkeypatch):
+    client = _auth_as(monkeypatch, 1, perms=["car_order:approve"])  # dispatcher
+    r = client.post(
+        "/api/v1/car-orders/741/meta/", {"dispatchable": True}, format="json"
+    )
+    assert r.status_code == 200, r.content
+    assert OrderMeta.objects.get(order_id=741).dispatchable is True

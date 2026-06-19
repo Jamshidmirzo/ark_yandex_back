@@ -9,10 +9,11 @@ Permissions mirror ark-backend codenames (``car_order:*``, ``driver:*``,
 ``garage:*``, ``vehicle_report:*``). Р1 = shift car; Р3 = live location.
 """
 
+import logging
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.csrf import csrf_exempt
@@ -64,6 +65,8 @@ from config.auth import DemoTokenAuthentication
 
 User = get_user_model()
 
+logger = logging.getLogger(__name__)
+
 DRIVER_GROUP = "Driver"
 
 
@@ -95,7 +98,10 @@ def _service_error_response(exc):
 
 def _src(request):
     """Where a request came from, for the tracking log: ``📱 <ip>`` (a real phone)
-    vs ``🖥 локально`` (our own server / the simulator on 127.0.0.1)."""
+    vs ``🖥 локально`` (our own server / the simulator on 127.0.0.1).
+
+    AUDIT L2: X-Forwarded-For is client-spoofable — this is for the LOG ONLY; never
+    repurpose it for any authorization / trust decision."""
     xff = request.META.get("HTTP_X_FORWARDED_FOR")
     ip = xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR", "?")
     return "🖥 локально" if ip in ("127.0.0.1", "::1", "localhost") else f"📱 {ip}"
@@ -122,7 +128,16 @@ def admin_approve_overlay(request, pk):
 
     resp = gateway(request, f"car-orders/{pk}/admin-approve/")
     if 200 <= resp.status_code < 300:
-        OrderMeta.objects.update_or_create(order_id=int(pk), defaults={"dispatchable": True})
+        # AUDIT H2: demo already committed the approve. If OUR overlay write then fails
+        # the two diverge — but the demo response must still reach the client, so we
+        # can't re-raise. Log it LOUDLY so the split-brain is alertable, not silent.
+        try:
+            OrderMeta.objects.update_or_create(order_id=int(pk), defaults={"dispatchable": True})
+        except Exception:
+            logger.exception(
+                "car_orders: demo approve succeeded but overlay update FAILED for order %s "
+                "— overlay/demo split-brain (order may not auto-dispatch)", pk
+            )
     return resp
 
 
@@ -137,7 +152,17 @@ def reject_overlay(request, pk):
 
     resp = gateway(request, f"car-orders/{pk}/reject/")
     if 200 <= resp.status_code < 300:
-        services.overlay.release(int(pk))  # terminal: clears claim + dispatchable
+        # AUDIT H2: demo already rejected. If OUR teardown fails the order stays
+        # dispatchable locally and keeps getting auto-assigned — the exact bug this
+        # hook prevents. Can't re-raise (the demo response must reach the client), so
+        # log LOUDLY so the divergence is caught.
+        try:
+            services.overlay.release(int(pk))  # terminal: clears claim + dispatchable
+        except Exception:
+            logger.exception(
+                "car_orders: demo reject succeeded but overlay teardown FAILED for order %s "
+                "— rejected order may keep auto-dispatching", pk
+            )
     return resp
 
 
@@ -218,12 +243,16 @@ class FleetLiveView(APIView):
 
 class LiveLocationView(APIView):
     """Live driver position for an order, served locally (gateway/hybrid setup).
-    GET returns the latest position or null; POST upserts {lat, lng}. Stays
-    AllowAny — the auto-simulator pushes here without a demo JWT, and the data is
-    keyed by order id. Mounted at /api/v1/car-orders/<id>/live-location/ BEFORE
-    the gateway catch-all."""
+    GET returns the latest position or null; POST upserts {lat, lng}, keyed by order
+    id. Mounted at /api/v1/car-orders/<id>/live-location/ BEFORE the gateway
+    catch-all.
 
-    authentication_classes: list = []
+    AUDIT C3: the POST stays open in dev (auth off) so the local auto-simulator can
+    push without a demo JWT, but when ``REQUIRE_OVERLAY_AUTH`` is enforced it requires
+    the order's own driver (or a dispatcher) — otherwise any anonymous caller could
+    move/forge another order's marker (and defeat the arrival geofence)."""
+
+    authentication_classes = [DemoTokenAuthentication]
     permission_classes = [AllowAny]
 
     def get(self, request, pk):
@@ -240,6 +269,21 @@ class LiveLocationView(APIView):
         )
 
     def post(self, request, pk):
+        from django.conf import settings
+
+        # AUDIT C3: when enforced, only the assigned driver (or a dispatcher) may write
+        # an order's live position. Open in dev so the simulator keeps working.
+        if getattr(settings, "REQUIRE_OVERLAY_AUTH", False):
+            meta = OrderMeta.objects.filter(order_id=pk).first()
+            actor = acting_driver_id(request)
+            is_owner = (
+                actor is not None
+                and meta is not None
+                and meta.driver_id is not None
+                and str(meta.driver_id) == str(actor)
+            )
+            if not (is_owner or OverlayDispatcher().has_permission(request, self)):
+                return _forbidden(_("You can only update your own order's live location."))
         serializer = LocationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         defaults = {
@@ -281,12 +325,21 @@ class OrderMetaView(APIView):
             return Response(None)
         return Response(OrderMetaSerializer(meta).data)
 
+    # Assignment / dispatch fields are owned by the claim / auto-dispatch / approve
+    # flows — never settable via a plain feature-overlay upsert. Otherwise (AUDIT C3/M2)
+    # any non-dispatcher could POST {driver_id, dispatchable, …} for ANY order id and
+    # self-assign a driver or flip it back into the dispatch queue, bypassing the busy
+    # guard in overlay.claim. A dispatcher (or open-dev mode) may still set them.
+    _PROTECTED_FIELDS = ("driver_id", "car_id", "car_label", "overlay_claimed", "dispatchable")
+
     def post(self, request, pk):
         serializer = OrderMetaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        meta, _created = OrderMeta.objects.update_or_create(
-            order_id=pk, defaults=serializer.validated_data
-        )
+        data = dict(serializer.validated_data)
+        if not OverlayDispatcher().has_permission(request, self):
+            for field in self._PROTECTED_FIELDS:
+                data.pop(field, None)
+        meta, _created = OrderMeta.objects.update_or_create(order_id=pk, defaults=data)
         return Response(OrderMetaSerializer(meta).data)
 
     def delete(self, request, pk):
@@ -538,6 +591,11 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
         # (not the last frame) so a slow crawl still accumulates and eventually updates.
         if prev is not None and moved_m < geometry.MIN_MOVE_M:
             OrderLiveLocation.objects.filter(order_id=meta.order_id).update(last_seen=now)
+            # Heartbeat: the marker/line stay put, but watchers (customer detail +
+            # dispatcher fleet) gate «Связь потеряна» on last_seen. A parked driver
+            # who keeps streaming the same fix would otherwise look offline after 30s,
+            # so push a last_seen-only frame — the client merge keeps prev lat/lng.
+            broadcast_location(meta.order_id, {"last_seen": now.isoformat()})
             continue
         loc, _ = OrderLiveLocation.objects.update_or_create(
             order_id=meta.order_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
@@ -1170,18 +1228,25 @@ class DriverViewSet(viewsets.GenericViewSet):
             .exists()
         ):
             return _bad_request("CAR_BUSY", _("This car is already on another driver's shift."))
-        with transaction.atomic():
-            if shift:
-                if _driver_has_active_trip(request.user):
-                    return _bad_request(
-                        "DRIVER_BUSY", _("Finish your active trip before switching cars.")
-                    )
-                shift.ended_at = timezone.now()
-                shift.status = DriverShift.Status.OFFLINE
-                shift.save(update_fields=["ended_at", "status", "updated_at"])
-            shift = DriverShift.objects.create(
-                driver=request.user, car=car, status=DriverShift.Status.ONLINE
-            )
+        try:
+            with transaction.atomic():
+                if shift:
+                    if _driver_has_active_trip(request.user):
+                        return _bad_request(
+                            "DRIVER_BUSY", _("Finish your active trip before switching cars.")
+                        )
+                    shift.ended_at = timezone.now()
+                    shift.status = DriverShift.Status.OFFLINE
+                    shift.save(update_fields=["ended_at", "status", "updated_at"])
+                shift = DriverShift.objects.create(
+                    driver=request.user, car=car, status=DriverShift.Status.ONLINE
+                )
+        except IntegrityError:
+            # AUDIT H3: the .exists() pre-check above is not atomic — a concurrent
+            # shift can grab the car (one_active_shift_per_car) or the driver
+            # (one_active_shift_per_driver) between check and create. The DB
+            # constraint then fires; map it to a clean 400 instead of a 500.
+            return _bad_request("CAR_BUSY", _("This car is already on another driver's shift."))
         return Response(DriverShiftSerializer(shift).data)
 
     @action(detail=False, methods=["post"], url_path="me/location")

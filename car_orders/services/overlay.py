@@ -10,11 +10,15 @@ maps it. Side-effects (notify / route push / WS teardown) run after the DB chang
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 
-from car_orders import scheduling
+from car_orders import concurrency, scheduling
 from car_orders.models import OrderLiveLocation, OrderMeta
 from car_orders.services import events
 
 _TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+# AUDIT M3: upper bound on a single «продлить» so a bogus value can't push planned_end
+# absurdly far. Generous on purpose — above the web UI's own max (DurationField allows
+# up to 99h) so no legitimate input is rejected; this only blocks nonsensical overflow.
+_MAX_EXTEND_MINUTES = 7 * 24 * 60
 
 
 class OverlayError(Exception):
@@ -35,6 +39,10 @@ def claim(order_id, driver_id, car_id=None, car_label=""):
     order per driver», and (re)starts the trip from ASSIGNED on a fresh/terminal
     state. Raises ``ALREADY_CLAIMED`` / ``DRIVER_BUSY``; returns the OrderMeta."""
     with transaction.atomic():
+        # Serialise concurrent claims for THIS driver so the «busy?» check below
+        # (which the order-row lock doesn't cover) can't race two orders onto one
+        # driver — AUDIT C1. Take it before any read so both contenders order here.
+        concurrency.lock_driver(driver_id)
         meta = OrderMeta.objects.select_for_update().filter(order_id=order_id).first()
         # Already taken by a DIFFERENT driver and still active → reject.
         if (
@@ -128,8 +136,11 @@ def extend(order_id, minutes):
     """Add ``minutes`` to the order's planned duration in our overlay and re-check the
     driver's next window. Returns ``(meta, conflict_dict_or_None)``; the extension
     always applies — the conflict is a warning. Raises ``VALIDATION``."""
-    if minutes <= 0:
-        raise OverlayError("VALIDATION", _("`minutes` must be a positive integer."))
+    if minutes <= 0 or minutes > _MAX_EXTEND_MINUTES:
+        raise OverlayError(
+            "VALIDATION",
+            _("`minutes` must be between 1 and %(max)s.") % {"max": _MAX_EXTEND_MINUTES},
+        )
     meta = OrderMeta.objects.filter(order_id=order_id).first()
     if meta is None:
         raise OverlayError("VALIDATION", _("No order to extend."))

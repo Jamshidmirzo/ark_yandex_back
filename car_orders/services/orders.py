@@ -23,6 +23,9 @@ from car_orders.models import CarOrder, DriverShift
 from car_orders.services import audit, shift
 
 _TERMINAL = (CarOrder.Status.COMPLETED, CarOrder.Status.REJECTED, CarOrder.Status.CANCELLED)
+# AUDIT M3: cap a single extension so a bogus value can't blow planned_end out.
+# Generous (above the web UI's 99h max) so no legitimate extend is rejected.
+_MAX_EXTEND_MINUTES = 7 * 24 * 60
 
 
 class OrderError(Exception):
@@ -200,8 +203,11 @@ def extend(order_id, actor, minutes):
         raise OrderError("PERMISSION_DENIED", _("You cannot extend this order."), http_status=403)
     if order.status not in (CarOrder.Status.SCHEDULED, CarOrder.Status.IN_PROGRESS):
         raise OrderError("INVALID_STATUS", _("Only an active order can be extended."))
-    if minutes <= 0:
-        raise OrderError("VALIDATION", _("`minutes` must be a positive integer."))
+    if minutes <= 0 or minutes > _MAX_EXTEND_MINUTES:
+        raise OrderError(
+            "VALIDATION",
+            _("`minutes` must be between 1 and %(max)s.") % {"max": _MAX_EXTEND_MINUTES},
+        )
     order.estimated_duration = (order.estimated_duration or timedelta()) + timedelta(
         minutes=minutes
     )

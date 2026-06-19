@@ -74,9 +74,35 @@ def trim_geometry(geom, lat, lng, max_points: int = MAX_STREAM_POINTS):
     return downsample([[lng, lat]] + ahead, max_points)
 
 
+def _point_segment_km(plat, plng, alat, alng, blat, blng) -> float:
+    """Distance (km) from point P to the SEGMENT A–B, via a local equirectangular
+    projection around P's latitude — accurate enough for the short legs used in the
+    deviation check, and far cheaper than a true geodesic."""
+    klat = 111.32  # km per degree of latitude
+    klng = 111.32 * math.cos(math.radians(plat))  # per degree of longitude at this lat
+    ax, ay = (alng - plng) * klng, (alat - plat) * klat
+    bx, by = (blng - plng) * klng, (blat - plat) * klat
+    dx, dy = bx - ax, by - ay
+    seg2 = dx * dx + dy * dy
+    if seg2 == 0:  # degenerate segment → distance to the point
+        return math.hypot(ax, ay)
+    t = -(ax * dx + ay * dy) / seg2  # projection of the origin onto A–B
+    t = max(0.0, min(1.0, t))  # clamp to the segment
+    return math.hypot(ax + t * dx, ay + t * dy)
+
+
 def min_dist_km_to_polyline(lat, lng, geom) -> float:
-    """Min great-circle distance (km) from a point to a polyline's vertices —
-    a cheap «how far off the route am I» check for re-routing on deviation."""
+    """Min distance (km) from a point to the polyline's SEGMENTS — a «how far off the
+    route am I» check for re-routing on deviation. Measuring to segments (not just
+    vertices, AUDIT H4) avoids a false «off-route» when the driver is mid-way along a
+    long, sparsely-sampled leg."""
     if not geom:
         return float("inf")
-    return min(haversine_km(lat, lng, p[1], p[0]) for p in geom if len(p) >= 2)
+    pts = [p for p in geom if len(p) >= 2]
+    if not pts:
+        return float("inf")
+    if len(pts) == 1:
+        return haversine_km(lat, lng, pts[0][1], pts[0][0])
+    return min(
+        _point_segment_km(lat, lng, a[1], a[0], b[1], b[0]) for a, b in zip(pts, pts[1:])
+    )

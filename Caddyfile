@@ -1,0 +1,23 @@
+{
+	# ACME email — Let's Encrypt notifies you about cert expiry. REPLACE with a
+	# real address you control.
+	email YOUR_EMAIL@example.com
+
+	# While TESTING, uncomment to use Let's Encrypt's STAGING CA. Staging issues
+	# UNTRUSTED certs (browser warns) but has far higher rate limits, so you can
+	# prove the proxy + WSS work without burning the shared nip.io production-cert
+	# bucket. Once curl/wss succeed end-to-end, comment it out and re-up to get a
+	# real trusted cert.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# Site address = the host hard-baked into the Vercel bundle. Caddy serves this
+# vhost AND auto-issues a Let's Encrypt cert for it. Do NOT change it (the front
+# would have to be rebuilt). One reverse_proxy line serves the HTTP API and
+# transparently upgrades wss:// WebSockets — Caddy v2 auto-detects the Upgrade,
+# so add NO header_up Upgrade/Connection, NO flush_interval, NO stream_timeout
+# (they would BREAK Caddy's automatic WS handling). Upstream is the compose
+# service name (backend), not 127.0.0.1, because Caddy runs as a compose service.
+164-90-176-107.nip.io {
+	reverse_proxy backend:8000
+}

@@ -123,6 +123,21 @@ DATABASES = {
     ),
 }
 
+# AUDIT C2: on SQLite, `SELECT ... FOR UPDATE` is a silent no-op, so the row locks
+# guarding the claim paths provide no protection under concurrency. That's fine for
+# dev/tests but unsafe in production — warn loudly so a prod deploy switches to
+# Postgres (DATABASE_URL=postgres://…).
+if not DEBUG and "sqlite" in DATABASES["default"].get("ENGINE", ""):
+    import warnings
+
+    warnings.warn(
+        "Running with SQLite while DEBUG=False: select_for_update() is a no-op, so the "
+        "car-orders claim concurrency guards are disabled. Use Postgres in production "
+        "(set DATABASE_URL). See car_orders/AUDIT.md finding C2.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
 
 # Password validation
 
@@ -195,6 +210,20 @@ UPSTREAM_TIMEOUT = (
 # and derives the driver from it instead of the request body. Flip on once login
 # is verified end-to-end. See car_orders.permissions.
 REQUIRE_OVERLAY_AUTH = env.bool("REQUIRE_OVERLAY_AUTH", default=False)
+
+# AUDIT H5: with overlay auth off, the overlay endpoints trust a body-supplied
+# driver_id and expose the whole order board to everyone. Fine for dev; a serious
+# IDOR surface in production — warn loudly if it ships with DEBUG off.
+if not DEBUG and not REQUIRE_OVERLAY_AUTH:
+    import warnings
+
+    warnings.warn(
+        "REQUIRE_OVERLAY_AUTH is OFF while DEBUG=False: overlay endpoints trust the "
+        "request-body driver_id and expose all orders. Set REQUIRE_OVERLAY_AUTH=True in "
+        "production. See car_orders/AUDIT.md finding H5.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 # Car-order scheduling & routing.

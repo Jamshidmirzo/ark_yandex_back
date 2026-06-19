@@ -55,6 +55,30 @@ _session.mount("https://", _adapter)
 # to spot in the server console.
 _SLOW_UPSTREAM_S = 3.0
 
+# Retry transient upstream CONNECTION resets. The pooled session keeps sockets
+# alive; the remote upstream drops idle ones, so the next request can grab a dead
+# socket and fail with "Connection reset by peer" / "Connection aborted" — even
+# though the very next attempt succeeds. This used to surface as an intermittent
+# 502 on auth/refresh + auth/me, which made the mobile app re-bootstrap and tear
+# down its WebSockets (connect/disconnect loop). Retry only the connection-failed
+# case (the reset fires at send time, so the request never reached the upstream —
+# safe to replay); a real response or a read timeout is NOT retried.
+_UPSTREAM_RETRIES = 2
+_UPSTREAM_BACKOFF_S = 0.15
+
+
+def _bad_gateway(url, exc):
+    return JsonResponse(
+        {
+            "error": {
+                "code": "UPSTREAM_UNREACHABLE",
+                "message": str(exc),
+                "details": {"upstream": url},
+            }
+        },
+        status=502,
+    )
+
 
 @csrf_exempt
 def gateway(request, path):
@@ -64,6 +88,10 @@ def gateway(request, path):
     if qs:
         url = f"{url}?{qs}"
 
+    # AUDIT L3: we forward all inbound client headers (minus _SKIP_REQUEST_HEADERS) to
+    # upstream verbatim, including Authorization. That's fine here — upstream is the
+    # auth authority and cookies are isolated separately — but DON'T start trusting any
+    # forwarded header for a local decision without re-validating it.
     headers = {}
     for key, value in request.headers.items():
         if key.lower() not in _SKIP_REQUEST_HEADERS:
@@ -71,28 +99,33 @@ def gateway(request, path):
     headers.setdefault("Accept", "application/json")
 
     started = time.monotonic()
-    try:
-        upstream = _session.request(
-            request.method,
-            url,
-            data=request.body or None,
-            headers=headers,
-            timeout=settings.UPSTREAM_TIMEOUT,  # (connect, read) — see settings
-            allow_redirects=False,
-        )
-    except requests.RequestException as exc:
-        logger.warning("upstream error after %.1fs %s %s — %s",
-                       time.monotonic() - started, request.method, path, exc)
-        return JsonResponse(
-            {
-                "error": {
-                    "code": "UPSTREAM_UNREACHABLE",
-                    "message": str(exc),
-                    "details": {"upstream": url},
-                }
-            },
-            status=502,
-        )
+    upstream = None
+    for attempt in range(_UPSTREAM_RETRIES + 1):
+        try:
+            upstream = _session.request(
+                request.method,
+                url,
+                data=request.body or None,
+                headers=headers,
+                timeout=settings.UPSTREAM_TIMEOUT,  # (connect, read) — see settings
+                allow_redirects=False,
+            )
+            break
+        except requests.ConnectionError as exc:
+            # Stale pooled keep-alive socket (or upstream briefly unreachable). urllib3
+            # has already evicted the bad socket, so a retry gets a fresh connection.
+            if attempt < _UPSTREAM_RETRIES:
+                time.sleep(_UPSTREAM_BACKOFF_S * (attempt + 1))
+                continue
+            logger.warning("upstream connection failed after %d attempts, %.1fs %s %s — %s",
+                           attempt + 1, time.monotonic() - started, request.method, path, exc)
+            return _bad_gateway(url, exc)
+        except requests.RequestException as exc:
+            # Other errors (e.g. a read timeout to a hung upstream): don't retry —
+            # the request may already have been received and processed upstream.
+            logger.warning("upstream error after %.1fs %s %s — %s",
+                           time.monotonic() - started, request.method, path, exc)
+            return _bad_gateway(url, exc)
 
     elapsed = time.monotonic() - started
     if elapsed >= _SLOW_UPSTREAM_S:

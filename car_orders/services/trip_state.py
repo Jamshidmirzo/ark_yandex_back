@@ -170,14 +170,29 @@ def advance(order_id, new_state, *, actor_driver_id=None, is_dispatcher=False):
     """
     if not is_known_state(new_state):
         raise TripStateError("VALIDATION", _("Unknown trip_state."))
-    meta = OrderMeta.objects.filter(order_id=order_id).first()
-    if meta is None:
-        raise TripStateError("NOT_FOUND", _("No order to advance."))
 
-    defaults = validate(
-        meta, new_state, actor_driver_id=actor_driver_id, is_dispatcher=is_dispatcher
-    )
-    meta, _created = OrderMeta.objects.update_or_create(order_id=order_id, defaults=defaults)
+    # AUDIT H1: read-validate-write the state machine (incl. the «one moving trip»
+    # check) inside ONE transaction, serialised per-driver so a double-tap / two
+    # devices can't both advance. The advisory lock is taken BEFORE the row lock —
+    # the same order as services.overlay.claim — so the two can't deadlock. We need
+    # the driver id for the lock key, so peek it first (unlocked), then take the
+    # lock and re-read the row under select_for_update.
+    from django.db import transaction
+
+    from car_orders import concurrency
+
+    with transaction.atomic():
+        peek = OrderMeta.objects.filter(order_id=order_id).only("driver_id").first()
+        if peek is None:
+            raise TripStateError("NOT_FOUND", _("No order to advance."))
+        concurrency.lock_driver(peek.driver_id)
+        meta = OrderMeta.objects.select_for_update().filter(order_id=order_id).first()
+        if meta is None:
+            raise TripStateError("NOT_FOUND", _("No order to advance."))
+        defaults = validate(
+            meta, new_state, actor_driver_id=actor_driver_id, is_dispatcher=is_dispatcher
+        )
+        meta, _created = OrderMeta.objects.update_or_create(order_id=order_id, defaults=defaults)
     _fire_side_effects(meta, new_state)
     return meta
 
