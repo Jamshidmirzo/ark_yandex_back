@@ -94,6 +94,18 @@ class LiveLocationConsumer(AsyncJsonWebsocketConsumer):
         if meta:
             out["trip_state"] = meta.trip_state
             out["returning"] = meta.returning
+            # Awaiting a driver (none assigned) → no live leg, so the map would
+            # only get the A/B pins. Fall back to the ordered trip A→B so the
+            # route still draws. Scoped to driverless orders ON PURPOSE: once a
+            # driver is assigned the route is their live leg (driver→pickup, then
+            # pickup→destination), which the live-location geometry carries — we
+            # must NOT override that approach leg with the full A→B line.
+            if not out.get("geometry") and meta.driver_id is None:
+                from car_orders.dispatch import planned_route_geometry
+
+                planned = planned_route_geometry(meta)
+                if planned:
+                    out["geometry"] = planned
         return out or None
 
 

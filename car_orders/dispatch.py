@@ -243,6 +243,33 @@ def push_order_route(meta, driver_pos=None):
     return geom
 
 
+def planned_route_geometry(meta):
+    """The client's ORDERED trip A→B (pickup → destination) as a downsampled
+    polyline, independent of any driver.
+
+    Used for an order that has no live leg yet — e.g. it's still awaiting a driver,
+    so :func:`order_leg` returns None (no driver position to approach from). Without
+    this the map only has the A/B pins and draws no line; this gives it the route
+    the requester actually asked for. Returns the geometry, or None when the coords
+    are missing or the leg is implausibly long (same sanity bound as a live leg)."""
+    if meta is None:
+        return None
+    o = (meta.origin_lat, meta.origin_lng)
+    d = (meta.address_lat, meta.address_lng)
+    if None in o or None in d:
+        return None
+    if haversine_km(o[0], o[1], d[0], d[1]) > MAX_LEG_KM:
+        return None
+    from car_orders import services
+
+    try:
+        result = services.estimate_route(o[0], o[1], d[0], d[1])
+    except Exception:
+        return None
+    geom = result.get("geometry") if result else None
+    return downsample(geom) if geom else None
+
+
 def run_once(first_seen, now=None, *, lead_min, stale_sec, pos_max_age, max_load=1):
     """One dispatch pass. Returns a list of (order_id, driver_id) just assigned.
     `first_seen` is a mutable {order_id: datetime} carried across passes."""
