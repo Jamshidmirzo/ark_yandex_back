@@ -42,7 +42,7 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
         if self.driver_id is None or lat is None or lng is None:
             await self.send_json({"error": "need identity (?token / ?driver_id) and lat/lng"})
             return
-        state = await self._apply(self.driver_id, lat, lng)
+        state = await self._apply(self.driver_id, lat, lng, content.get("heading"))
         # Always return the marker position + order/stage; include the polyline ONLY
         # when it changed (the approach re-route / a leg change), so we don't resend
         # the whole route every frame. The app moves the marker to lat/lng along the
@@ -87,14 +87,15 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
             return None
 
     @database_sync_to_async
-    def _apply(self, driver_id, lat, lng):
+    def _apply(self, driver_id, lat, lng, heading=None):
         """Run the shared heartbeat logic, then read back the driver's active order
         + its current live position + route polyline for the reply."""
         from car_orders.models import OrderLiveLocation, OrderMeta
         from car_orders.views import _apply_driver_location
 
         try:
-            _apply_driver_location(int(driver_id), float(lat), float(lng), "📡 ws")
+            head = float(heading) if heading is not None else None
+            _apply_driver_location(int(driver_id), float(lat), float(lng), "📡 ws", heading=head)
         except (TypeError, ValueError):
             return {}
         terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)

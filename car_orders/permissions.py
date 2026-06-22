@@ -53,6 +53,34 @@ class OverlayDispatcher(BasePermission):
         return bool(expand_permission_codename("car_order:approve") & set(perms))
 
 
+class OverlayDriverOrDispatcher(BasePermission):
+    """Overlay actions that mutate a trip / claim / shift (overlay-claim, release,
+    extend, GPS uplink, go on shift). The actor must actually be a DRIVER
+    (``driver:accept_order`` — the same codename the native ``claim``/``release``
+    require) or a DISPATCHER assigning on a driver's behalf (``car_order:approve``).
+
+    Fails CLOSED when enforced: an authenticated user holding neither codename (a
+    customer-tier token) cannot drive overlay trip state, so the overlay contract
+    matches its native twin instead of being silently looser. Identity is still
+    derived from the token (see ``assignee_driver_id``), so a dispatcher may name the
+    driver in the body while a plain driver only ever acts on themselves. Open in dev
+    (auth off) like the other overlay gates."""
+
+    def has_permission(self, request, view):
+        if not _auth_required():
+            return True
+        if not _authed(request):
+            return False
+        user = request.user
+        if getattr(user, "is_superuser", False):
+            return True
+        perms = set(getattr(user, "permissions", set()))
+        allowed = expand_permission_codename("driver:accept_order") | expand_permission_codename(
+            "car_order:approve"
+        )
+        return bool(allowed & perms)
+
+
 def acting_driver_id(request, fallback=None):
     """Authoritative driver id: the authenticated demo user's id when available,
     else the client-supplied ``fallback`` (only trusted when auth isn't enforced)."""

@@ -30,9 +30,15 @@ def _planned_geometry(meta):
     if haversine_km(o_lat, o_lng, d_lat, d_lng) > MAX_LEG_KM:
         return None
     try:
-        geom = services.estimate_route(o_lat, o_lng, d_lat, d_lng).get("geometry")
+        result = services.estimate_route(o_lat, o_lng, d_lat, d_lng)
     except Exception:
-        geom = None
+        result = None
+    # Only draw a real road route on the dispatcher map; the straight-line haversine
+    # fallback (OSRM down) cuts A→B through buildings, so show pins only until OSRM
+    # answers — mirrors dispatch.planned_route_geometry.
+    if not result or result.get("source") != "osrm":
+        return None
+    geom = result.get("geometry")
     return downsample(geom) if geom else None
 
 

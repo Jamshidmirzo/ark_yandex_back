@@ -97,12 +97,14 @@ def validate(meta, new_state, *, actor_driver_id=None, is_dispatcher=False) -> d
     current (persisted) order."""
     cur = meta.trip_state
 
-    # Only the ASSIGNED driver (or a dispatcher) may advance the trip.
+    # Only the ASSIGNED driver (or a dispatcher) may advance the trip. A DRIVERLESS
+    # order has no assignee, so a plain driver can't advance it either — otherwise any
+    # driver could drive an unassigned order's state machine. A trusted server-side
+    # call (the simulator / auto-dispatch) passes actor_driver_id=None and is exempt.
     if (
-        meta.driver_id is not None
-        and actor_driver_id is not None
-        and str(actor_driver_id) != str(meta.driver_id)
+        actor_driver_id is not None
         and not is_dispatcher
+        and (meta.driver_id is None or str(actor_driver_id) != str(meta.driver_id))
     ):
         raise TripStateError(
             "PERMISSION_DENIED",
@@ -193,8 +195,52 @@ def advance(order_id, new_state, *, actor_driver_id=None, is_dispatcher=False):
             meta, new_state, actor_driver_id=actor_driver_id, is_dispatcher=is_dispatcher
         )
         meta, _created = OrderMeta.objects.update_or_create(order_id=order_id, defaults=defaults)
+        # The mobile client drives the whole trip through trip_state and never calls
+        # the native /start/ or /complete/ endpoints, so the demo CarOrder.status
+        # would otherwise never reach `completed` (an overlay-claimed order stays
+        # `awaiting_driver`, a scheduled one stays `scheduled`). Mirror the terminal
+        # onto the native order here — atomically with the meta update — so status,
+        # shift and audit stay in sync.
+        if meta.trip_state == _TS.COMPLETED:
+            _reconcile_native_completion(meta)
     _fire_side_effects(meta, new_state)
     return meta
+
+
+def _reconcile_native_completion(meta) -> None:
+    """Mirror an overlay ``COMPLETED`` onto the demo ``CarOrder`` so the native
+    status, the driver's shift and the audit trail stay in sync — even for an
+    overlay-claimed or scheduled order the mobile client never explicitly
+    /start/ed or /complete/d (its only completion signal is ``trip_state=completed``).
+
+    Idempotent: a CarOrder already in a terminal state is left untouched, so a web
+    client that closes a native order via ``/complete/`` (and may also post
+    ``trip_state=completed``) is never double-recorded. No-op when there is no
+    backing CarOrder (overlay unit tests, driverless metas)."""
+    from car_orders.models import CarOrder
+    from car_orders.services import audit, shift
+
+    order = CarOrder.objects.select_for_update().filter(pk=meta.order_id).first()
+    if order is None or order.status in (
+        CarOrder.Status.COMPLETED,
+        CarOrder.Status.REJECTED,
+        CarOrder.Status.CANCELLED,
+    ):
+        return
+    order.status = CarOrder.Status.COMPLETED
+    fields = ["status", "updated_at"]
+    if order.finished_at is None:
+        order.finished_at = timezone.now()
+        fields.append("finished_at")
+    if order.started_at is None:
+        # A scheduled order completed without a native /start/ has no started_at;
+        # stamp it so finished_at ≥ started_at and the activity reads sanely.
+        order.started_at = order.finished_at or timezone.now()
+        fields.append("started_at")
+    order.save(update_fields=fields)
+    shift.reset_driver_shift(order.driver)
+    if order.driver_id is not None:
+        audit.record_completed(order, order.driver)
 
 
 def _fire_side_effects(meta, new_state) -> None:

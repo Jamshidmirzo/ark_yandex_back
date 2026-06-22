@@ -33,11 +33,15 @@ class OverlayError(Exception):
         super().__init__(str(message))
 
 
-def claim(order_id, driver_id, car_id=None, car_label=""):
+def claim(order_id, driver_id, car_id=None, car_label="", driver_name="", driver_phone=""):
     """Claim an order in our overlay so a driver can take a 2nd order sequentially
     with the same car (the demo forbids that). Locks the row, enforces «one active
     order per driver», and (re)starts the trip from ASSIGNED on a fresh/terminal
-    state. Raises ``ALREADY_CLAIMED`` / ``DRIVER_BUSY``; returns the OrderMeta."""
+    state. Raises ``ALREADY_CLAIMED`` / ``DRIVER_BUSY``; returns the OrderMeta.
+
+    ``driver_name`` / ``driver_phone`` are the driver snapshot (captured client-side
+    from the claiming driver's own session) so the requester can see + call the
+    driver without HR access to ``/employees/``."""
     with transaction.atomic():
         # Serialise concurrent claims for THIS driver so the «busy?» check below
         # (which the order-row lock doesn't cover) can't race two orders onto one
@@ -68,14 +72,20 @@ def claim(order_id, driver_id, car_id=None, car_label=""):
                 _("This driver already has an active order (#%(id)s). Finish it first.")
                 % {"id": busy.order_id},
             )
+        defaults = {
+            "driver_id": driver_id,
+            "car_id": car_id,
+            "car_label": car_label,
+            "overlay_claimed": True,
+        }
+        # Don't wipe an existing driver snapshot if a re-claim arrives without one.
+        if driver_name:
+            defaults["driver_name"] = driver_name
+        if driver_phone:
+            defaults["driver_phone"] = driver_phone
         meta, created = OrderMeta.objects.update_or_create(
             order_id=order_id,
-            defaults={
-                "driver_id": driver_id,
-                "car_id": car_id,
-                "car_label": car_label,
-                "overlay_claimed": True,
-            },
+            defaults=defaults,
         )
         # Don't rewind an in-progress trip on a double-tap; only (re)start from a
         # fresh / terminal state.
@@ -90,14 +100,35 @@ def claim(order_id, driver_id, car_id=None, car_label=""):
     return meta
 
 
-def release(order_id, *, requeue=False):
+def _ensure_actor_owns(meta, actor_driver_id, is_dispatcher) -> None:
+    """A driver may only release / extend their OWN order; a dispatcher (or a trusted
+    server-side call that passes ``actor_driver_id=None`` — e.g. the demo reject hook)
+    may act on any. Mirrors the native ownership checks (services.orders.release /
+    .extend) and ``trip_state.validate`` so the overlay layer isn't an IDOR shortcut
+    around them. Raises ``PERMISSION_DENIED`` (403) for a non-owner non-dispatcher."""
+    if (
+        actor_driver_id is not None
+        and meta.driver_id is not None
+        and str(actor_driver_id) != str(meta.driver_id)
+        and not is_dispatcher
+    ):
+        raise OverlayError(
+            "PERMISSION_DENIED",
+            _("You can only act on your own order."),
+            http_status=403,
+        )
+
+
+def release(order_id, *, requeue=False, actor_driver_id=None, is_dispatcher=False):
     """Tear down the overlay claim (on demo reject / cancel / release / done). With
     ``requeue`` the order returns to the queue (non-terminal + dispatchable);
     otherwise it goes terminal CANCELLED. Idempotent — returns the OrderMeta, or
-    None when there was nothing to release."""
+    None when there was nothing to release. ``actor_driver_id``/``is_dispatcher``
+    enforce ownership when a user (not a server hook) drives it."""
     meta = OrderMeta.objects.filter(order_id=order_id).first()
     if meta is None:
         return None
+    _ensure_actor_owns(meta, actor_driver_id, is_dispatcher)
     prev_driver = meta.driver_id
     _drop_claim(meta)
     if requeue:
@@ -124,6 +155,13 @@ def reassign(order_id):
     _drop_claim(meta)
     meta.trip_state = OrderMeta.TripState.ASSIGNED  # non-terminal «awaiting» state
     meta.dispatchable = True
+    # Remember who we just pulled it off, so the auto-dispatch worker doesn't hand
+    # the order straight back to them (they're typically the nearest free driver).
+    if prev_driver is not None:
+        excluded = list(meta.excluded_driver_ids or [])
+        if prev_driver not in excluded:
+            excluded.append(prev_driver)
+        meta.excluded_driver_ids = excluded
     meta.save()
     OrderLiveLocation.objects.filter(order_id=order_id).delete()
     # Tell the watchers the current tracking ended; the driver they were on is gone.
@@ -132,10 +170,12 @@ def reassign(order_id):
     return meta
 
 
-def extend(order_id, minutes):
+def extend(order_id, minutes, *, actor_driver_id=None, is_dispatcher=False):
     """Add ``minutes`` to the order's planned duration in our overlay and re-check the
     driver's next window. Returns ``(meta, conflict_dict_or_None)``; the extension
-    always applies — the conflict is a warning. Raises ``VALIDATION``."""
+    always applies — the conflict is a warning. Raises ``VALIDATION``.
+    ``actor_driver_id``/``is_dispatcher`` enforce ownership (driver's own order or a
+    dispatcher), mirroring the native ``services.orders.extend`` gate."""
     if minutes <= 0 or minutes > _MAX_EXTEND_MINUTES:
         raise OverlayError(
             "VALIDATION",
@@ -144,6 +184,7 @@ def extend(order_id, minutes):
     meta = OrderMeta.objects.filter(order_id=order_id).first()
     if meta is None:
         raise OverlayError("VALIDATION", _("No order to extend."))
+    _ensure_actor_owns(meta, actor_driver_id, is_dispatcher)
     # An order created without a route estimate has no duration yet — treat a
     # missing duration as 0 so «продлить» still works (it establishes / pushes the
     # window out) instead of 400-ing on every freshly-created order.

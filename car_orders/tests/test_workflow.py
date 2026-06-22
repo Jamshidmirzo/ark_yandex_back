@@ -301,9 +301,15 @@ def test_estimate_returns_duration_and_geometry(env):
         format="json",
     )
     assert r.status_code == 200, r.content
-    assert r.data["duration_minutes"] > 0
-    assert len(r.data["geometry"]) >= 2
+    assert r.data["duration_minutes"] > 0  # ETA is always present (haversine is fine)
     assert r.data["source"] in ("osrm", "haversine")
+    # New contract: only a real OSRM route ships geometry; the haversine fallback
+    # returns NO line (clients show pins only) instead of a straight line through
+    # buildings. Deterministic regardless of whether OSRM is reachable in CI.
+    if r.data["source"] == "osrm":
+        assert len(r.data["geometry"]) >= 2
+    else:
+        assert r.data["geometry"] == []
 
 
 @pytest.mark.django_db

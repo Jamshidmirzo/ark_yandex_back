@@ -236,6 +236,26 @@ CAR_ORDER_DEFAULT_SERVICE = timedelta(minutes=env.int("CAR_ORDER_DEFAULT_SERVICE
 # public demo server by default; point at a self-hosted OSRM or swap to the
 # Yandex Router API in production.
 CAR_ORDER_OSRM_URL = env("CAR_ORDER_OSRM_URL", default="https://router.project-osrm.org")
+# How long (seconds) a successful OSRM route is memoised in-process. Longer = fewer
+# hits on the rate-limited public demo (so fewer straight-line fallbacks), at the cost
+# of staleness; live legs re-key on the driver's moving position so they're unaffected.
+# 0 disables caching. Bumped from the old 60 s while we're still on the public demo.
+CAR_ORDER_ROUTE_CACHE_TTL = env.int("CAR_ORDER_ROUTE_CACHE_TTL", default=180)
+# Half-range (deg) for the OSRM `bearings` start-snap constraint on a live driver leg
+# (see routing._osrm_params). 90° rejects the oncoming carriageway without being so
+# tight it provokes a «no route» → straight-line fallback.
+CAR_ORDER_OSRM_BEARING_RANGE = env.int("CAR_ORDER_OSRM_BEARING_RANGE", default=90)
+
+# Server-side geocoding proxy (GET /car-orders/geocode/) — the order form's address
+# search/reverse. Proxied here so the browser never hits OSM directly (its public
+# server blocks browser-origin bursts with HTTP 429). Override the User-Agent with a
+# real contact per OSM policy; point CAR_ORDER_NOMINATIM_URL at a self-hosted
+# Nominatim to drop the rate limit entirely.
+CAR_ORDER_NOMINATIM_URL = env("CAR_ORDER_NOMINATIM_URL", default="https://nominatim.openstreetmap.org")
+CAR_ORDER_GEOCODER_USER_AGENT = env(
+    "CAR_ORDER_GEOCODER_USER_AGENT", default="ark-car-orders/1.0 (+https://ark.glob.uz)"
+)
+CAR_ORDER_GEOCODE_CACHE_TTL = env.int("CAR_ORDER_GEOCODE_CACHE_TTL", default=24 * 60 * 60)
 
 # Arrival geofence (server-side): the driver may mark «at_client» / «at_destination»
 # only within this many metres of the point AND with a fresh GPS fix. 0 disables it

@@ -20,7 +20,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km
+from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km, trim_geometry
 from car_orders.models import DispatchSettings, DriverPosition, DriverShiftState, OrderMeta
 
 logger = logging.getLogger(__name__)
@@ -54,17 +54,22 @@ def active_count_by_driver():
     return counts
 
 
-def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1):
+def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1, excluded=None):
     """Rank on-shift drivers for one order. Returns a list of
     ``(driver_id, car_id, car_label, distance_km, note)`` best-first; ``note == ""``
     marks an IDEAL (auto-assignable) candidate. Tagged candidates (wrong type /
-    overloaded / unknown type) sort last and are never auto-assigned."""
+    overloaded / unknown type / reassigned-off) sort last and are never
+    auto-assigned. ``excluded`` is the set of driver ids the dispatcher took this
+    order off — they must never become an ideal candidate again."""
+    excluded = excluded or set()
     out = []
     for s in shifts:
         n = load.get(s.driver_id, 0)
         pos = positions.get(s.driver_id)
         dist = haversine_km(pos[0], pos[1], pickup[0], pickup[1]) if (pos and pickup) else None
-        if car_type_id is not None and s.car_type_id != car_type_id:
+        if s.driver_id in excluded:
+            note = "reassigned-off"
+        elif car_type_id is not None and s.car_type_id != car_type_id:
             note = "wrong-type"
         elif n >= max_load:
             note = "overloaded"
@@ -108,6 +113,11 @@ def claim(order_id, driver_id, car_id, car_label):
             return False
         # Already held by a driver and still active → don't steal it.
         if meta.driver_id is not None and meta.trip_state not in TERMINAL:
+            return False
+        # The dispatcher took this order off this driver — never auto-assign it back
+        # (final invariant check under the row lock, in case the exclusion list grew
+        # between ranking and claim).
+        if driver_id in (meta.excluded_driver_ids or []):
             return False
         # One active order per driver (matches OverlayClaimView / demo).
         busy = (
@@ -205,42 +215,76 @@ def order_leg(meta, driver_pos=None):
     return None  # waiting → parked, no moving route
 
 
-def push_order_route(meta, driver_pos=None):
+def push_order_route(meta, driver_pos=None, bearing=None):
     """Compute the current leg's route (OSRM) and broadcast its geometry + store it
     on OrderLiveLocation, so the map always shows where the driver should go — the
     server controls navigation. Called on assignment and every trip-state change.
-    Returns the geometry, or None when the stage has no moving leg."""
+    Returns the geometry, or None when the stage has no moving leg.
+
+    ``bearing`` (deg) is the driver's travel direction; passed to OSRM so a live leg
+    that starts at the driver's moving position snaps to the correct (not oncoming)
+    carriageway. Applied only when the leg actually starts at ``driver_pos``."""
     if meta is None:
         return None
     if driver_pos is None:
         driver_pos = _latest_pos(meta.driver_id)
     leg = order_leg(meta, driver_pos)
+    from car_orders.models import OrderLiveLocation
+    from car_orders.ws import broadcast_location
+
     if not leg:
         return None
     (slat, slng), (elat, elng) = leg
 
     if haversine_km(slat, slng, elat, elng) > MAX_LEG_KM:
+        # Implausible leg (stale/bogus GPS — e.g. a fix in another city). Don't route
+        # it, and CLEAR any stale geometry (e.g. an old straight-line fallback) so the
+        # map stops showing a wrong line for this order until a sane fix arrives.
+        existing = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
+        if existing is not None and existing.geometry:
+            existing.geometry = []
+            existing.save(update_fields=["geometry"])
         return None
     from car_orders import services
-    from car_orders.models import OrderLiveLocation
-    from car_orders.ws import broadcast_location
 
+    # Constrain OSRM's start-snap to the driver's heading ONLY when the leg actually
+    # starts at the driver's live position (true for every MOVING leg; the
+    # at_destination return preview starts at the fixed destination → unconstrained).
+    leg_bearing = (
+        bearing
+        if (
+            bearing is not None
+            and driver_pos
+            and driver_pos[0] is not None
+            and abs(slat - driver_pos[0]) < 1e-9
+            and abs(slng - driver_pos[1]) < 1e-9
+        )
+        else None
+    )
     try:
-        result = services.estimate_route(slat, slng, elat, elng)
+        result = services.estimate_route(slat, slng, elat, elng, bearing=leg_bearing)
     except Exception:
         result = None
     geom = result.get("geometry") if result else None
     source = result.get("source") if result else None
     if not geom:
         return None
-    # A transient OSRM outage falls back to a 2-point straight line (source
-    # «haversine») that cuts across roads/houses. Don't let it overwrite a good road
-    # route that's already on the map — keep the last canonical polyline; the next
-    # successful re-route restores the live line. (When there's no route yet we still
-    # draw the fallback, so the map isn't blank on first assignment.)
     existing = OrderLiveLocation.objects.filter(order_id=meta.order_id).first()
-    if source != "osrm" and existing is not None and existing.geometry:
-        return existing.geometry
+    # A transient OSRM outage falls back to a 2-point straight line (source
+    # «haversine») that cuts across roads/houses — NEVER show it as the route:
+    #   • if a good road route is already on the map, keep it, but RE-ANCHOR its start
+    #     to the driver's current point so it doesn't appear to run back to where they
+    #     used to be; the next successful OSRM re-route restores the full live line.
+    #   • if there's no route yet (first push), draw NOTHING rather than a line through
+    #     buildings — the next GPS fix re-routes (empty geometry counts as «deviated»).
+    if source != "osrm":
+        if existing is not None and existing.geometry:
+            if driver_pos and driver_pos[0] is not None:
+                kept = trim_geometry(existing.geometry, driver_pos[0], driver_pos[1])
+                broadcast_location(meta.order_id, {"geometry": kept})
+                return kept
+            return existing.geometry
+        return None
     geom = downsample(geom)  # keep the WS frame well under the 1 MB limit
     loc, created = OrderLiveLocation.objects.get_or_create(
         order_id=meta.order_id,
@@ -276,7 +320,12 @@ def planned_route_geometry(meta):
         result = services.estimate_route(o[0], o[1], d[0], d[1])
     except Exception:
         return None
-    geom = result.get("geometry") if result else None
+    # Only draw a real road route. The straight-line haversine fallback (OSRM down)
+    # would cut A→B through buildings, so when it's not an OSRM result show pins only
+    # — a later OSRM success (cached) fills the line in.
+    if not result or result.get("source") != "osrm":
+        return None
+    geom = result.get("geometry")
     return downsample(geom) if geom else None
 
 
@@ -296,7 +345,8 @@ def run_once(first_seen, now=None, *, lead_min, stale_sec, pos_max_age, max_load
         if not is_due(meta, first_seen, now, lead_min, stale_sec):
             continue
         ranked = rank_drivers(
-            meta.car_type_id, (meta.origin_lat, meta.origin_lng), shifts, positions, load, max_load
+            meta.car_type_id, (meta.origin_lat, meta.origin_lng), shifts, positions, load, max_load,
+            excluded=set(meta.excluded_driver_ids or []),
         )
         if not ranked or ranked[0][4] != "":  # no candidate, or best isn't ideal
             continue

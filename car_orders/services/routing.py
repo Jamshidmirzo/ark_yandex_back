@@ -33,8 +33,15 @@ _AVG_SPEED_KMH = 30  # city average, used by the offline fallback
 # line that cuts across buildings. Most flaky modes (429, connection reset) fail
 # fast, so retries add little latency; a genuine outage still falls back cleanly.
 _OSRM_TIMEOUT_S = 8  # per attempt
-_OSRM_ATTEMPTS = 2  # total tries against a flaky/rate-limited server
-_OSRM_BACKOFF_S = 0.3  # base backoff, scaled by attempt
+_OSRM_ATTEMPTS = 3  # total tries against a flaky/rate-limited server
+_OSRM_BACKOFF_S = 0.3  # base backoff, doubled per attempt (0.3s, 0.6s, …)
+
+# Default half-range (deg) for the OSRM `bearings` snap constraint on the leg START.
+# A range of 90° lets the start edge be any *forward-ish* direction and rejects the
+# roughly-opposite (≈180° off) edge — i.e. the ONCOMING carriageway — so a noisy GPS
+# fix can no longer snap the route onto the wrong side («дорога на встречку»). Wide
+# enough not to provoke OSRM «no route» (which would fall back to a straight line).
+_OSRM_BEARING_RANGE = 90
 
 # In-process memo of OSRM results: key → (monotonic_ts, result). Process-local
 # (each worker caches independently) — that's fine, it just trims OSRM load.
@@ -45,17 +52,20 @@ _ROUTE_CACHE_MAX = 512  # bound memory; drop the oldest entry past this
 _CACHE_LOCK = threading.Lock()
 
 
-def _route_cache_key(base, origin_lat, origin_lng, dest_lat, dest_lng) -> tuple:
+def _route_cache_key(base, origin_lat, origin_lng, dest_lat, dest_lng, bearing) -> tuple:
     # Key on the OSRM base too: a different (or disabled) server yields a different
     # route, so a result cached under one URL must never be served under another.
     # ~1 m precision (5 dp): dedupe repeated pushes of the same leg without merging
-    # genuinely different legs.
+    # genuinely different legs. The start `bearing` (bucketed to 15°) is part of the
+    # key — a different approach direction snaps to a different start edge, so it must
+    # not reuse a route computed for another bearing. Fixed legs pass bearing=None.
     return (
         base,
         round(origin_lat, 5),
         round(origin_lng, 5),
         round(dest_lat, 5),
         round(dest_lng, 5),
+        round(bearing / 15) if bearing is not None else None,
     )
 
 
@@ -64,7 +74,7 @@ def clear_route_cache() -> None:
     _ROUTE_CACHE.clear()
 
 
-def estimate_route(origin_lat, origin_lng, dest_lat, dest_lng):
+def estimate_route(origin_lat, origin_lng, dest_lat, dest_lng, bearing=None):
     """Estimate the driving route between two points (memoised — see module docs).
 
     Tries the configured OSRM server (``CAR_ORDER_OSRM_URL``); falls back to a
@@ -72,19 +82,23 @@ def estimate_route(origin_lat, origin_lng, dest_lat, dest_lng):
     source}`` where ``geometry`` is a list of ``[lng, lat]`` pairs (GeoJSON order).
     A *copy* is always returned, so callers (e.g. :func:`estimate_duration`) can
     mutate the result without corrupting the cache.
+
+    ``bearing`` (deg, 0-360) is the direction the route should LEAVE the origin in —
+    set for a live leg that starts at the driver's moving position, so OSRM snaps the
+    start to the correct (not oncoming) carriageway. ``None`` for a fixed leg.
     """
     ttl = getattr(settings, "CAR_ORDER_ROUTE_CACHE_TTL", 60)
     if ttl <= 0:  # caching disabled
-        return _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng)
+        return _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng, bearing)
 
     base = getattr(settings, "CAR_ORDER_OSRM_URL", "").rstrip("/")
-    key = _route_cache_key(base, origin_lat, origin_lng, dest_lat, dest_lng)
+    key = _route_cache_key(base, origin_lat, origin_lng, dest_lat, dest_lng, bearing)
     now = time.monotonic()
     hit = _ROUTE_CACHE.get(key)
     if hit is not None and now - hit[0] < ttl:
         return dict(hit[1])
 
-    result = _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng)
+    result = _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng, bearing)
     # Cache only real OSRM hits — the offline fallback is cheap and must not pin a
     # straight line over a recovered OSRM server.
     if result.get("source") == "osrm":
@@ -96,7 +110,21 @@ def estimate_route(origin_lat, origin_lng, dest_lat, dest_lng):
     return dict(result)
 
 
-def _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng):
+def _osrm_params(bearing):
+    """Query params for the OSRM /route call. When the leg starts at the driver's
+    moving position we pass ``bearings`` so OSRM snaps the START edge to the way the
+    driver is actually travelling instead of the nearest edge (which on a two-way /
+    divided road can be the ONCOMING carriageway → «дорога на встречку»). Two
+    waypoints → two ``;``-separated entries; only the start is constrained, the
+    destination is left free (empty entry)."""
+    params = {"overview": "full", "geometries": "geojson"}
+    if bearing is not None:
+        rng = getattr(settings, "CAR_ORDER_OSRM_BEARING_RANGE", _OSRM_BEARING_RANGE)
+        params["bearings"] = f"{int(bearing) % 360},{int(rng)};"
+    return params
+
+
+def _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng, bearing=None):
     """The actual OSRM call + haversine fallback, without the memo layer.
 
     Retries a flaky OSRM a couple of times (see ``_OSRM_ATTEMPTS``) before giving
@@ -110,7 +138,7 @@ def _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng):
             try:
                 resp = requests.get(
                     f"{base}/route/v1/driving/{coords}",
-                    params={"overview": "full", "geometries": "geojson"},
+                    params=_osrm_params(bearing),
                     timeout=_OSRM_TIMEOUT_S,
                 )
                 data = resp.json()
@@ -127,7 +155,7 @@ def _estimate_route_uncached(origin_lat, origin_lng, dest_lat, dest_lng):
                 break
             except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
                 if attempt + 1 < _OSRM_ATTEMPTS:
-                    time.sleep(_OSRM_BACKOFF_S * (attempt + 1))
+                    time.sleep(_OSRM_BACKOFF_S * (2 ** attempt))
                     continue
                 logger.warning(
                     "car_orders: OSRM route failed after %d attempt(s) via %s (%s) — "
@@ -173,11 +201,15 @@ def estimate_payload(origin_lat, origin_lng, dest_lat, dest_lng, service_minutes
     result = estimate_duration(origin_lat, origin_lng, dest_lat, dest_lng, service_time=service_td)
     total = result["duration"]
     drive_s = total.total_seconds() - result["service_s"]
+    # Keep the distance/ETA (haversine is a fine estimate) but DON'T hand back the
+    # straight-line geometry on an OSRM miss — the form/accept previews would draw it
+    # through buildings. Empty geometry = «pins only» (clients guard on length >= 2).
+    geometry = result["geometry"] if result["source"] == "osrm" else []
     return {
         "distance_m": round(result["distance_m"]),
         "drive_minutes": round(drive_s / 60),
         "service_minutes": round(result["service_s"] / 60),
         "duration_minutes": round(total.total_seconds() / 60),
-        "geometry": result["geometry"],
+        "geometry": geometry,
         "source": result["source"],
     }

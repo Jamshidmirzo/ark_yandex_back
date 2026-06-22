@@ -30,6 +30,31 @@ def test_claim_assigns_a_free_order():
     assert meta.trip_state == TS.ASSIGNED
 
 
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_claim_snapshots_driver_name_and_phone():
+    # The requester can't read HR /employees/, so the driver's name + phone are
+    # snapshotted onto the meta at claim and served inline — «who took my order».
+    _meta(900)
+    meta = overlay.claim(
+        900, driver_id=5, car_label="Damas (01A)",
+        driver_name="Иван Водитель", driver_phone="+998901234567",
+    )
+    assert meta.driver_name == "Иван Водитель"
+    assert meta.driver_phone == "+998901234567"
+
+
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_reclaim_without_snapshot_keeps_existing():
+    # An idempotent re-claim that omits the snapshot must not wipe a good one.
+    _meta(900)
+    overlay.claim(900, driver_id=5, driver_name="Иван", driver_phone="+99890")
+    meta = overlay.claim(900, driver_id=5)
+    assert meta.driver_name == "Иван"
+    assert meta.driver_phone == "+99890"
+
+
 @pytest.mark.django_db
 def test_claim_rejects_order_taken_by_another_driver():
     _meta(900, overlay_claimed=True, driver_id=9, trip_state=TS.ASSIGNED)
@@ -82,6 +107,24 @@ def test_reassign_returns_order_to_queue():
     assert meta.trip_state == TS.ASSIGNED
     assert meta.dispatchable is True
     assert meta.driver_id is None
+
+
+@pytest.mark.django_db
+def test_reassign_records_excluded_driver():
+    """The driver we took the order OFF is remembered so auto-dispatch can't give
+    it straight back to them."""
+    _meta(900, overlay_claimed=True, driver_id=5, trip_state=TS.IN_TRIP)
+    meta = overlay.reassign(900)
+    assert meta.excluded_driver_ids == [5]
+    # A second reassign off a different driver appends; no duplicates.
+    meta.driver_id = 7
+    meta.save()
+    meta = overlay.reassign(900)
+    assert meta.excluded_driver_ids == [5, 7]
+    meta.driver_id = 5
+    meta.save()
+    meta = overlay.reassign(900)
+    assert meta.excluded_driver_ids == [5, 7]  # 5 not duplicated
 
 
 @pytest.mark.django_db

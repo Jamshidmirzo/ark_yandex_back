@@ -4,6 +4,7 @@ from car_orders.models import (
     Car,
     CarOrder,
     CarOrderActivity,
+    CarOrderTemplate,
     CarType,
     DispatchSettings,
     DriverShift,
@@ -57,3 +58,9 @@ class DriverShiftAdmin(admin.ModelAdmin):
 class VehicleReportAdmin(admin.ModelAdmin):
     list_display = ("id", "vehicle", "submitted_by", "date", "mileage")
     list_filter = ("date",)
+
+
+@admin.register(CarOrderTemplate)
+class CarOrderTemplateAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "address", "car_type_id", "created_by_id", "created_at")
+    search_fields = ("name", "project_name", "origin_label", "address")

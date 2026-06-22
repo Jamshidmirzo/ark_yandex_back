@@ -63,7 +63,9 @@ def test_enforced_invalid_token_is_401(monkeypatch):
 @override_settings(REQUIRE_OVERLAY_AUTH=True)
 @pytest.mark.django_db
 def test_enforced_identity_comes_from_token_not_body(monkeypatch):
-    client = _auth_as(monkeypatch, 671)
+    # A real claiming driver carries driver:accept_order (the §A gate). The point of
+    # this test is the anti-spoofing: identity is the token (671), not the body (999).
+    client = _auth_as(monkeypatch, 671, perms=["driver:accept_order"])
     r = client.post(
         "/api/v1/car-orders/700/overlay-claim/",
         {"driver_id": 999, "car_id": 1, "car_label": "X"},  # body claims 999

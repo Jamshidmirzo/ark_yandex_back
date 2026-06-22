@@ -8,6 +8,7 @@ from car_orders.models import (
     Car,
     CarOrder,
     CarOrderActivity,
+    CarOrderTemplate,
     CarType,
     DriverShift,
     OrderMeta,
@@ -136,6 +137,9 @@ class LocationSerializer(serializers.Serializer):
 
     lat = serializers.FloatField(min_value=-90, max_value=90)
     lng = serializers.FloatField(min_value=-180, max_value=180)
+    # Optional device travel heading (deg). Used as a fallback for the OSRM start-snap
+    # when the server can't derive direction from consecutive fixes yet.
+    heading = serializers.FloatField(min_value=0, max_value=360, required=False, allow_null=True)
 
 
 # --- Drivers (reader view over Users in the Driver group) -------------------
@@ -334,7 +338,10 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "parent_order_id",
             "car_id",
             "car_label",
+            "driver_name",
+            "driver_phone",
             "overlay_claimed",
+            "excluded_driver_ids",
             "origin_lat",
             "origin_lng",
             "address_lat",
@@ -354,7 +361,20 @@ class OrderMetaSerializer(serializers.ModelSerializer):
         ]
         # `returning` is driven by the trip-state transition (not the form), so it's
         # read-only here — only TripStateView flips it on the return leg.
-        read_only_fields = ["order_id", "returning", "planned_end", "at_risk", "is_late"]
+        # `trip_state` is ALSO read-only on this plain feature-overlay upsert: it may
+        # only advance through the TripStateView state machine (transitions, arrival
+        # geofence, assigned-driver check, side-effects). Otherwise any authenticated
+        # user could POST {"trip_state": "completed"} to /meta/ and force-complete ANY
+        # order, bypassing all of it (the clients only ever set it via setTripState).
+        read_only_fields = [
+            "order_id", "returning", "trip_state", "planned_end", "at_risk", "is_late",
+            "excluded_driver_ids",
+        ]
+        # `driver_name` / `driver_phone` are the driver's own display snapshot, captured
+        # at claim by the claiming driver's client (both claim paths: overlay-claim AND
+        # the free-car meta upsert). They're plain display strings — NOT assignment
+        # control like driver_id — so they stay writable and are intentionally NOT in
+        # MetaView._PROTECTED_FIELDS.
 
     def get_at_risk(self, obj) -> bool:
         from django.utils import timezone
@@ -380,6 +400,46 @@ class OrderMetaSerializer(serializers.ModelSerializer):
         ):
             return timezone.now() > obj.planned_datetime
         return False
+
+
+class CarOrderTemplateSerializer(serializers.ModelSerializer):
+    """Reusable order «заготовка» — route + car type + duration + note, minus the
+    date/time. Coordinates are validated like the order write serializer."""
+
+    origin_lat = serializers.FloatField(
+        min_value=-90, max_value=90, required=False, allow_null=True
+    )
+    origin_lng = serializers.FloatField(
+        min_value=-180, max_value=180, required=False, allow_null=True
+    )
+    address_lat = serializers.FloatField(
+        min_value=-90, max_value=90, required=False, allow_null=True
+    )
+    address_lng = serializers.FloatField(
+        min_value=-180, max_value=180, required=False, allow_null=True
+    )
+
+    class Meta:
+        model = CarOrderTemplate
+        fields = [
+            "id",
+            "name",
+            "project_name",
+            "origin_lat",
+            "origin_lng",
+            "origin_label",
+            "address",
+            "address_lat",
+            "address_lng",
+            "car_type_id",
+            "estimated_duration",
+            "service_time",
+            "note",
+            "created_by_id",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_by_id", "created_at", "updated_at"]
 
 
 class CarOrderActivitySerializer(serializers.ModelSerializer):

@@ -6,13 +6,21 @@ the invariants the old ``TripStateView`` enforced are pinned independently of th
 """
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.utils import timezone
 
-from car_orders.models import DriverPosition, OrderLiveLocation, OrderMeta
+from car_orders.models import (
+    CarOrder,
+    CarOrderActivity,
+    DriverPosition,
+    OrderLiveLocation,
+    OrderMeta,
+)
 from car_orders.services import trip_state
 
 TS = OrderMeta.TripState
+User = get_user_model()
 
 
 def _meta(state, *, order_id=900, driver_id=5, has_return=False, returning=False):
@@ -170,3 +178,56 @@ def test_advance_clears_live_location_on_terminal():
     OrderLiveLocation.objects.create(order_id=900, lat=41.3, lng=69.2, last_seen=timezone.now())
     trip_state.advance(900, TS.COMPLETED)
     assert not OrderLiveLocation.objects.filter(order_id=900).exists()
+
+
+# ---- advance → completed mirrors onto the native CarOrder ------------------
+#
+# The mobile client closes a trip ONLY via trip_state=completed (it never calls
+# the native /start/ or /complete/ endpoints). An overlay-claimed order keeps its
+# demo status at `awaiting_driver`, so without this reconciliation the native
+# order would never reach `completed` — which is exactly why finishing on-location
+# failed before. These pin the mirror + its idempotency.
+
+def _native_order(status, driver):
+    """A backing demo CarOrder whose pk an OrderMeta can point at."""
+    return CarOrder.objects.create(
+        created_by=driver,
+        driver=driver,
+        status=status,
+        planned_datetime=timezone.now(),
+        estimated_duration=timezone.timedelta(hours=1),
+    )
+
+
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_advance_completed_reconciles_native_order():
+    driver = User.objects.create(username="drv-reconcile")
+    # Overlay-claimed → demo status stays `awaiting_driver` the whole trip.
+    order = _native_order(CarOrder.Status.AWAITING_DRIVER, driver)
+    _meta(TS.AT_DESTINATION, order_id=order.pk, driver_id=driver.id)
+
+    trip_state.advance(order.pk, TS.COMPLETED, actor_driver_id=driver.id)
+
+    order.refresh_from_db()
+    assert order.status == CarOrder.Status.COMPLETED
+    assert order.finished_at is not None
+    assert order.started_at is not None  # stamped even though /start/ never ran
+    assert CarOrderActivity.objects.filter(
+        order=order, kind=CarOrderActivity.Kind.COMPLETED
+    ).count() == 1
+
+
+@override_settings(CAR_ORDER_OSRM_URL="")
+@pytest.mark.django_db
+def test_advance_completed_is_idempotent_for_terminal_native_order():
+    driver = User.objects.create(username="drv-idem")
+    order = _native_order(CarOrder.Status.COMPLETED, driver)  # already terminal
+    _meta(TS.AT_DESTINATION, order_id=order.pk, driver_id=driver.id)
+
+    trip_state.advance(order.pk, TS.COMPLETED, actor_driver_id=driver.id)
+
+    # A terminal native order is left untouched → no second COMPLETED audit row.
+    assert CarOrderActivity.objects.filter(
+        order=order, kind=CarOrderActivity.Kind.COMPLETED
+    ).count() == 0

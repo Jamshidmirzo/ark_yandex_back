@@ -50,6 +50,20 @@ def test_rank_tags_overloaded_driver():
     assert ranked[0][4] == "overloaded"  # already has 1 active → not ideal
 
 
+@pytest.mark.django_db
+def test_rank_tags_reassigned_off_driver():
+    """A driver the dispatcher took the order off is tagged (never ideal), so the
+    nearest free of the right type isn't auto-picked again."""
+    _shift(1, 11, type_id=5, lat=41.31, lng=69.24)  # ideal but reassigned-off
+    _shift(2, 12, type_id=5, lat=41.30, lng=69.20)  # ideal, farther
+    shifts = list(DriverShiftState.objects.all())
+    ranked = dispatch.rank_drivers(
+        5, (41.311, 69.241), shifts, dispatch.fresh_positions(300), load={}, excluded={1}
+    )
+    assert ranked[0][0] == 2 and ranked[0][4] == ""  # the OTHER driver is best now
+    assert ranked[-1][0] == 1 and ranked[-1][4] == "reassigned-off"
+
+
 # ---- due rules -------------------------------------------------------------
 
 @pytest.mark.django_db
@@ -105,6 +119,36 @@ def test_run_once_skips_non_dispatchable():
     _order(50, 5, 41.31, 69.24, is_urgent=True, dispatchable=False)  # not approved
     assigned = dispatch.run_once({}, lead_min=45, stale_sec=180, pos_max_age=300)
     assert assigned == []
+
+
+@pytest.mark.django_db
+def test_run_once_never_reassigns_to_excluded_driver():
+    """The only on-shift driver was taken off this order → it stays driverless
+    rather than bouncing straight back to them."""
+    _shift(1, 11, type_id=5, lat=41.31, lng=69.24)
+    _order(60, 5, 41.31, 69.24, is_urgent=True, excluded_driver_ids=[1])
+    assigned = dispatch.run_once({}, lead_min=45, stale_sec=180, pos_max_age=300)
+    assert assigned == []
+    assert OrderMeta.objects.get(order_id=60).driver_id is None
+
+
+@pytest.mark.django_db
+def test_run_once_assigns_a_different_driver_when_one_is_excluded():
+    """Excluding one driver doesn't strand the order — another eligible driver
+    still gets it."""
+    _shift(1, 11, type_id=5, lat=41.311, lng=69.241)  # nearest, but excluded
+    _shift(2, 12, type_id=5, lat=41.30, lng=69.20)  # farther, eligible
+    _order(61, 5, 41.311, 69.241, is_urgent=True, excluded_driver_ids=[1])
+    assigned = dispatch.run_once({}, lead_min=45, stale_sec=180, pos_max_age=300)
+    assert assigned == [(61, 2)]
+
+
+@pytest.mark.django_db
+def test_claim_rejects_excluded_driver():
+    """Even called directly, claim refuses an excluded driver (invariant guard)."""
+    _order(62, 5, 41.31, 69.24, excluded_driver_ids=[1])
+    assert dispatch.claim(62, driver_id=1, car_id=11, car_label="Cobalt (01A)") is False
+    assert OrderMeta.objects.get(order_id=62).driver_id is None
 
 
 # ---- runtime toggle --------------------------------------------------------

@@ -370,6 +370,10 @@ class DriverPosition(models.Model):
     driver_id = models.PositiveIntegerField(unique=True, db_index=True, verbose_name=_("Driver id"))
     lat = models.FloatField(verbose_name=_("Latitude"))
     lng = models.FloatField(verbose_name=_("Longitude"))
+    # Device-reported travel heading (deg, 0-360) for the last fix, when the app sends
+    # it. Optional: the live re-route prefers a heading derived from consecutive fixes
+    # and uses this only as a fallback, so legacy clients that omit it still work.
+    heading = models.FloatField(null=True, blank=True, verbose_name=_("Heading"))
     last_seen = models.DateTimeField(verbose_name=_("Last seen"))
 
     class Meta:
@@ -466,10 +470,25 @@ class OrderMeta(TimestampMixin):
     # can reuse the same car sequentially, which the demo backend forbids).
     car_id = models.PositiveIntegerField(null=True, blank=True, verbose_name=_("Car id"))
     car_label = models.CharField(max_length=255, blank=True, verbose_name=_("Car label"))
+    # Driver snapshot captured AT CLAIM (like `car_label`) — the claiming driver's
+    # own session can read their name/phone, but the order's requester can't reach
+    # the HR `/employees/` endpoint, so we snapshot it here and serve it inline with
+    # the meta. Lets the customer see «who took my order» + call them, no HR access.
+    driver_name = models.CharField(max_length=255, blank=True, verbose_name=_("Driver name"))
+    driver_phone = models.CharField(max_length=32, blank=True, verbose_name=_("Driver phone"))
     # True ONLY when the order was claimed via OUR layer (overlay-claim), not the
     # demo claim. Distinguishes "managed by us" from a normal demo claim where we
     # still record driver_id just for the window check.
     overlay_claimed = models.BooleanField(default=False, verbose_name=_("Claimed in our layer"))
+    # Demo driver ids the dispatcher has deliberately taken this order OFF of (via
+    # «Переназначить»). The auto-dispatch worker must NEVER hand the order back to
+    # them — otherwise it instantly re-assigns the nearest free driver, who is the
+    # very one just removed, and the order bounces straight back. Append-only per
+    # order; a manual assignment from the dispatcher is still allowed (deliberate
+    # override). See dispatch.rank_drivers / dispatch.claim.
+    excluded_driver_ids = models.JSONField(
+        default=list, blank=True, verbose_name=_("Drivers excluded from auto-dispatch")
+    )
     origin_lat = models.FloatField(null=True, blank=True)
     origin_lng = models.FloatField(null=True, blank=True)
     address_lat = models.FloatField(null=True, blank=True)
@@ -544,6 +563,52 @@ class VehicleReport(TimestampMixin):
 
     def __str__(self):
         return f"Report for {self.vehicle_id} on {self.date}"
+
+
+class CarOrderTemplate(TimestampMixin):
+    """A reusable «заготовка» for a recurring car order (e.g. съёмки «Севимли →
+    Сквер»), so a frequent route doesn't have to be re-entered every time.
+
+    Purely a LOCAL form-prefill overlay — the order itself is still created in the
+    demo backend through the gateway. A template stores everything the create form
+    needs EXCEPT the date/time (that's picked fresh for each order). ``car_type_id``
+    is the demo CarType id (kept as a plain int, like ``OrderMeta.car_type_id``,
+    since car types are served from demo). Templates are shared across the team
+    (the whole list is visible to everyone); ``created_by_id`` is the demo user id
+    of whoever saved it, kept for display only."""
+
+    name = models.CharField(max_length=120, verbose_name=_("Template name"))
+    project_name = models.CharField(
+        max_length=255, blank=True, verbose_name=_("Default order name")
+    )
+    # Route A → B: coordinates + the human-readable labels the form shows.
+    origin_lat = models.FloatField(null=True, blank=True, verbose_name=_("Origin latitude"))
+    origin_lng = models.FloatField(null=True, blank=True, verbose_name=_("Origin longitude"))
+    origin_label = models.CharField(max_length=500, blank=True, verbose_name=_("Origin label"))
+    address = models.CharField(max_length=500, blank=True, verbose_name=_("Destination label"))
+    address_lat = models.FloatField(null=True, blank=True, verbose_name=_("Destination latitude"))
+    address_lng = models.FloatField(null=True, blank=True, verbose_name=_("Destination longitude"))
+    car_type_id = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Car type id (demo)")
+    )
+    estimated_duration = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Estimated duration (minutes)")
+    )
+    service_time = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("On-site service time (minutes)")
+    )
+    note = models.TextField(blank=True, verbose_name=_("Note"))
+    created_by_id = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name=_("Created by (demo user id)")
+    )
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = _("Car order template")
+        verbose_name_plural = _("Car order templates")
+
+    def __str__(self):
+        return f"CarOrderTemplate {self.id} «{self.name}»"
 
 
 class DispatchSettings(models.Model):

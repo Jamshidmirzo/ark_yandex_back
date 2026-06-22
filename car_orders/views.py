@@ -29,6 +29,7 @@ from car_orders import dispatch, geometry, scheduling, services
 from car_orders.models import (
     Car,
     CarOrder,
+    CarOrderTemplate,
     CarType,
     DispatchSettings,
     DriverPosition,
@@ -41,12 +42,14 @@ from car_orders.models import (
 from car_orders.permissions import (
     OverlayAuthenticated,
     OverlayDispatcher,
+    OverlayDriverOrDispatcher,
     acting_driver_id,
     assignee_driver_id,
 )
 from car_orders.serializers import (
     CarOrderActivitySerializer,
     CarOrderSerializer,
+    CarOrderTemplateSerializer,
     CarOrderWriteSerializer,
     CarSerializer,
     CarTypeSerializer,
@@ -227,13 +230,47 @@ class EstimateView(APIView):
         )
 
 
+class GeocodeView(APIView):
+    """Server-side geocoding proxy (search + reverse) for the order form's address
+    lookup. Public (AllowAny) like :class:`EstimateView` — it's a stateless
+    address↔coords helper with no upstream auth. Keeps clients off
+    ``nominatim.openstreetmap.org`` directly (OSM blocks browser-origin bursts with
+    HTTP 429, which silently empties the form's «Откуда/Куда» suggestions); we add a
+    proper User-Agent, a 1 req/s throttle and a day-long cache. Mounted at
+    /api/v1/car-orders/geocode/ BEFORE the gateway catch-all.
+
+    - ``GET ?q=<text>``       → ``{"results": [{lat, lng, label}, …]}``
+    - ``GET ?lat=<>&lng=<>``  → ``{"label": "<address>"}``
+    """
+
+    authentication_classes: list = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from car_orders.services import geocode
+
+        lat = request.query_params.get("lat")
+        lng = request.query_params.get("lng")
+        if lat is not None and lng is not None:
+            try:
+                label = geocode.reverse(float(lat), float(lng))
+            except (TypeError, ValueError):
+                return Response({"detail": "bad lat/lng"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"label": label})
+        return Response({"results": geocode.search(request.query_params.get("q", ""))})
+
+
 class FleetLiveView(APIView):
     """Dispatcher dashboard snapshot — every active order with its live position +
     risk flags, for «Диспетчерская». Live updates come over the fleet WebSocket
     (/ws/car-orders/fleet/)."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Dispatcher-only: this is the whole «Диспетчерская» board (every active order +
+    # live position + risk flags). Only dispatcher screens (web FleetLivePage, mobile
+    # features/dispatcher) call it, so gating it on car_order:approve closes the leak
+    # of the full fleet to any authenticated customer/driver token.
+    permission_classes = [OverlayDispatcher]
 
     def get(self, request):
         from car_orders.fleet import fleet_live_orders
@@ -451,7 +488,9 @@ class OverlayClaimView(APIView):
     source of login/base data."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Driver self-claims (token) or dispatcher assigns (body) — never a customer-tier
+    # token. Matches the native ``claim`` gate (driver:accept_order).
+    permission_classes = [OverlayDriverOrDispatcher]
 
     def post(self, request, pk):
         # The assignee — a dispatcher assigns to the CHOSEN driver (body), a driver
@@ -460,7 +499,9 @@ class OverlayClaimView(APIView):
         driver_id = assignee_driver_id(request, self)
         try:
             meta = services.overlay.claim(
-                pk, driver_id, request.data.get("car_id"), request.data.get("car_label", "")
+                pk, driver_id, request.data.get("car_id"), request.data.get("car_label", ""),
+                driver_name=request.data.get("driver_name", ""),
+                driver_phone=request.data.get("driver_phone", ""),
             )
         except services.overlay.OverlayError as exc:
             return _service_error_response(exc)
@@ -474,7 +515,10 @@ class TripStateView(APIView):
     stages are geofenced. Thin HTTP adapter over ``services.trip_state``."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Advancing the trip is a driver/dispatcher mutation (the service still enforces
+    # actor==assigned-driver|dispatcher); the class gate keeps a customer-tier token
+    # out entirely, consistent with the other overlay mutations (§A).
+    permission_classes = [OverlayDriverOrDispatcher]
 
     def post(self, request, pk):
         try:
@@ -501,10 +545,20 @@ class OverlayReleaseView(APIView):
     over the WebSocket. Idempotent."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Tearing down a claim is a driver (own order) or dispatcher action — not a
+    # customer-tier token. Matches the native ``release`` gate (driver:accept_order).
+    permission_classes = [OverlayDriverOrDispatcher]
 
     def post(self, request, pk):
-        meta = services.overlay.release(pk, requeue=bool(request.data.get("requeue")))
+        try:
+            meta = services.overlay.release(
+                pk,
+                requeue=bool(request.data.get("requeue")),
+                actor_driver_id=acting_driver_id(request),
+                is_dispatcher=OverlayDispatcher().has_permission(request, self),
+            )
+        except services.overlay.OverlayError as exc:
+            return _service_error_response(exc)
         if meta is None:
             return Response({"ok": True})
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
@@ -518,7 +572,9 @@ class ExtendView(APIView):
     Allowed for the driver or a dispatcher (the frontend gates the button)."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Per the docstring this is "driver or dispatcher" only — now enforced, not just
+    # gated by the frontend button.
+    permission_classes = [OverlayDriverOrDispatcher]
 
     def post(self, request, pk):
         try:
@@ -526,7 +582,12 @@ class ExtendView(APIView):
         except (TypeError, ValueError):
             minutes = 0
         try:
-            meta, conflict = services.overlay.extend(pk, minutes)
+            meta, conflict = services.overlay.extend(
+                pk,
+                minutes,
+                actor_driver_id=acting_driver_id(request),
+                is_dispatcher=OverlayDispatcher().has_permission(request, self),
+            )
         except services.overlay.OverlayError as exc:
             return _service_error_response(exc)
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data, "conflict": conflict})
@@ -550,12 +611,14 @@ class ReassignView(APIView):
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
 
 
-def _apply_driver_location(driver_id, lat, lng, src=""):
+def _apply_driver_location(driver_id, lat, lng, src="", heading=None):
     """Store the driver's position and attach it to their ACTIVE (non-terminal)
     order — NOT only the moving stages. With «1 водитель = 1 активный заказ» that's
     exactly their current order, so live phone GPS drives the map in every stage
     (assigned / en route / parked). Shared by the single + batch location endpoints.
-    Returns the order ids whose live position was updated."""
+    Returns the order ids whose live position was updated.
+
+    ``heading`` (deg) is the device-reported travel direction, when the app sends it."""
     now = timezone.now()
     # Never attach to driver_id=None — a None filter matches EVERY driverless order
     # and smears one phone's GPS across all of them. The caller must identify the
@@ -563,8 +626,20 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
     if driver_id is None:
         _log_tracking(f"📍 GPS [{src}] БЕЗ driver_id — пропущено (телефон не опознан)")
         return []
+    # Travel direction for the OSRM start-snap (stops the route flipping to the
+    # oncoming carriageway). Prefer the bearing DERIVED from the previous fix → this
+    # one — that's the driver's true motion and is unambiguous — and fall back to the
+    # device heading only when we can't (no prior fix / move too small to be real).
+    prev_pos = DriverPosition.objects.filter(driver_id=driver_id).first()
+    travel_bearing = None
+    if prev_pos is not None and prev_pos.lat is not None:
+        if geometry.haversine_km(prev_pos.lat, prev_pos.lng, lat, lng) * 1000 >= geometry.MIN_MOVE_M:
+            travel_bearing = geometry.bearing_deg(prev_pos.lat, prev_pos.lng, lat, lng)
+    if travel_bearing is None and heading is not None:
+        travel_bearing = heading
     DriverPosition.objects.update_or_create(
-        driver_id=driver_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
+        driver_id=driver_id,
+        defaults={"lat": lat, "lng": lng, "heading": heading, "last_seen": now},
     )
     terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
     metas = list(OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal))
@@ -600,18 +675,30 @@ def _apply_driver_location(driver_id, lat, lng, src=""):
         loc, _ = OrderLiveLocation.objects.update_or_create(
             order_id=meta.order_id, defaults={"lat": lat, "lng": lng, "last_seen": now}
         )
-        broadcast_location(meta.order_id, {"lat": lat, "lng": lng, "last_seen": now.isoformat()})
+        # Snap the DISPLAYED marker onto the route so the dot rides the line instead of
+        # floating 80–100 m beside it on biased GPS — within a heading-gated corridor
+        # (SNAP_CORRIDOR_M); a real detour falls back to raw and the deviation re-route
+        # below takes over. Display-only: the stored `loc`/`DriverPosition` and the
+        # `lat/lng` used for the deviation check stay RAW, so re-routing is unchanged.
+        show_lat, show_lng = lat, lng
+        if meta.trip_state in moving and loc.geometry:
+            show_lat, show_lng = geometry.snap_to_route(lat, lng, loc.geometry, travel_bearing)
+        broadcast_location(
+            meta.order_id, {"lat": show_lat, "lng": show_lng, "last_seen": now.isoformat()}
+        )
         # RE-ROUTE on deviation: recompute the polyline from the LIVE position when
-        # there's no route yet OR the driver has strayed >80 m off the current one
+        # there's no route yet OR the driver has strayed >30 m off the current one
         # (turned the «wrong» way) — so it redraws along the road they actually took.
+        # 30 m (was 80 m): in dense blocks 80 m is a street over, so the line could run
+        # along a parallel/oncoming street before a re-route kicked in.
         if meta.trip_state in moving:
             deviated = (
                 True
                 if not loc.geometry
-                else geometry.min_dist_km_to_polyline(lat, lng, loc.geometry) > 0.08
+                else geometry.min_dist_km_to_polyline(lat, lng, loc.geometry) > 0.03
             )
             if deviated:
-                dispatch.push_order_route(meta, driver_pos=(lat, lng))
+                dispatch.push_order_route(meta, driver_pos=(lat, lng), bearing=travel_bearing)
             elif loc.geometry:
                 # On-route & actually moved: trim the canonical line to what's ahead
                 # and pin its start to the car. Smooth follow without OSRM per frame.
@@ -637,14 +724,20 @@ class DriverLocationView(APIView):
     Body: ``{driver_id, lat, lng}`` → ``{updated_orders: [...]}``."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Posting GPS attaches it to the driver's active order — a driver (or dispatcher)
+    # action, mirroring the native ``my_location`` gate (driver:accept_order).
+    permission_classes = [OverlayDriverOrDispatcher]
 
     def post(self, request):
         driver_id = acting_driver_id(request, request.data.get("driver_id"))
         serializer = LocationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         updated = _apply_driver_location(
-            driver_id, serializer.validated_data["lat"], serializer.validated_data["lng"], _src(request)
+            driver_id,
+            serializer.validated_data["lat"],
+            serializer.validated_data["lng"],
+            _src(request),
+            heading=serializer.validated_data.get("heading"),
         )
         return Response({"updated_orders": updated})
 
@@ -655,7 +748,14 @@ class DriverShiftView(APIView):
     car) / DELETE end. Mounted at /drivers/me/shift/ BEFORE the gateway catch-all."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+
+    def get_permissions(self):
+        # Reading your own shift is harmless (any authenticated user); going ON shift
+        # or ending it mutates the overlay, so require an actual driver (or dispatcher),
+        # matching the native ``my_shift`` gate (driver:accept_order).
+        if self.request.method in ("PATCH", "DELETE"):
+            return [OverlayDriverOrDispatcher()]
+        return [OverlayAuthenticated()]
 
     def get(self, request):
         driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
@@ -746,7 +846,10 @@ class DriverShiftsView(APIView):
     candidate with the right car type."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Dispatcher-only: the full on-shift roster (every driver + their car) feeds the
+    # dispatcher candidate list. Only dispatcher screens read it, so gate it on
+    # car_order:approve rather than exposing every driver's shift to any token.
+    permission_classes = [OverlayDispatcher]
 
     def get(self, request):
         return Response(
@@ -819,7 +922,11 @@ class DriverPositionsView(APIView):
     (seconds) drops stale fixes."""
 
     authentication_classes = [DemoTokenAuthentication]
-    permission_classes = [OverlayAuthenticated]
+    # Dispatcher-only: the latest position of EVERY driver powers the dispatcher's
+    # «nearest free driver» suggestion (only dispatcher screens call it). Gating on
+    # car_order:approve stops any authenticated token from enumerating all drivers'
+    # whereabouts.
+    permission_classes = [OverlayDispatcher]
 
     def get(self, request):
         qs = DriverPosition.objects.all()
@@ -862,7 +969,19 @@ class MyOverlayOrdersView(APIView):
 
     def get(self, request):
         terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-        qs = OrderMeta.objects.exclude(trip_state__in=terminal)
+        # ?include_terminal=1 → the driver's full HISTORY (completed/cancelled too),
+        # most-recent-first. Default keeps the active-only board (mobile «Мои заказы»,
+        # the dispatcher board) untouched. The web «Заявки на машину» history view
+        # opts in: «1 водитель = 1 активный заказ», so without this a driver only ever
+        # sees their single live order and never the orders they already finished.
+        include_terminal = request.query_params.get("include_terminal") in ("1", "true", "True")
+        qs = OrderMeta.objects.all() if include_terminal else OrderMeta.objects.exclude(
+            trip_state__in=terminal
+        )
+        order_by = ("-planned_datetime", "-order_id") if include_terminal else (
+            "planned_datetime",
+            "order_id",
+        )
         requested = request.query_params.get("driver_id")
 
         if OverlayDispatcher().has_permission(request, self):
@@ -870,19 +989,116 @@ class MyOverlayOrdersView(APIView):
             # driver via ?driver_id=.
             if requested:
                 qs = qs.filter(driver_id=requested)
-            return Response(
-                OrderMetaSerializer(
-                    qs.order_by("planned_datetime", "order_id"), many=True
-                ).data
-            )
+            return Response(OrderMetaSerializer(qs.order_by(*order_by), many=True).data)
 
         # Driver: only their own. Identity is the token's user when enforced, so a
         # spoofed ?driver_id= can't enumerate another driver's orders.
         driver_id = acting_driver_id(request, requested)
         if not driver_id:
             return Response([])
-        qs = qs.filter(driver_id=driver_id).order_by("planned_datetime", "order_id")
+        qs = qs.filter(driver_id=driver_id).order_by(*order_by)
         return Response(OrderMetaSerializer(qs, many=True).data)
+
+
+class MyActiveOrderView(APIView):
+    """The caller's single ACTIVE car order — ``GET /car-orders/me/active-order/``.
+
+    The base ``CarOrder`` lives upstream (demo), but the DRIVER ASSIGNMENT lives in
+    OUR overlay — so demo reports a claimed order as ``awaiting_driver / driver=null``
+    even after a driver took it. We resolve the caller's active ``OrderMeta`` (driver
+    from the token; a spoofed body ``driver_id`` is ignored when auth is enforced),
+    fetch the base order body from demo, and overlay our ``driver`` + ``trip_state``
+    onto it. Returns the reconciled order, or ``null`` when the caller has none.
+
+    Mounted before the gateway catch-all: the base ``CarOrderViewSet`` router is NOT
+    served locally, so without this the path proxies to demo and 404s (which is why
+    the mobile/web "my active order" came back empty)."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
+        if not driver_id:
+            return Response(None)
+        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
+        meta = (
+            OrderMeta.objects.exclude(trip_state__in=terminal)
+            .filter(driver_id=driver_id)
+            .order_by("planned_datetime", "order_id")
+            .first()
+        )
+        if not meta:
+            return Response(None)
+
+        overlay = OrderMetaSerializer(meta).data
+        # Pull the base order body from demo and reconcile our assignment onto it, so
+        # the order doesn't read as the stale demo «Ожидает водителя / без водителя».
+        from config.gateway import gateway
+
+        resp = gateway(request, f"car-orders/{meta.order_id}/")
+        if 200 <= resp.status_code < 300:
+            try:
+                import json
+
+                order = json.loads(resp.content)
+            except (ValueError, TypeError):
+                order = None
+            if isinstance(order, dict):
+                order["trip_state"] = meta.trip_state
+                order["driver_id"] = meta.driver_id
+                order["overlay"] = overlay
+                return Response(order)
+        # Upstream body unavailable (deleted/unreachable) — the overlay alone still
+        # tells the client they have an active order rather than 404-ing.
+        return Response(overlay)
+
+
+class CarOrderTemplatesView(APIView):
+    """Reusable order «заготовки» (e.g. съёмки «Севимли → Сквер»). A LOCAL
+    form-prefill overlay — the order itself is still created in demo. Templates are
+    SHARED across the team, so GET returns the whole list. Mounted before the
+    gateway catch-all.
+
+      • GET  → all templates (ordered by name)
+      • POST → create one (records the caller as ``created_by_id`` when known)
+    """
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def get(self, request):
+        templates = CarOrderTemplate.objects.all()
+        return Response(CarOrderTemplateSerializer(templates, many=True).data)
+
+    def post(self, request):
+        serializer = CarOrderTemplateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        template = serializer.save(created_by_id=acting_driver_id(request))
+        return Response(
+            CarOrderTemplateSerializer(template).data, status=status.HTTP_201_CREATED
+        )
+
+
+class CarOrderTemplateDetailView(APIView):
+    """Edit / delete a single order template. Any authenticated user may update or
+    remove a shared template (it's an internal team tool)."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    permission_classes = [OverlayAuthenticated]
+
+    def patch(self, request, pk):
+        template = CarOrderTemplate.objects.filter(pk=pk).first()
+        if not template:
+            return _bad_request("NOT_FOUND", "Шаблон не найден.")
+        serializer = CarOrderTemplateSerializer(template, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(CarOrderTemplateSerializer(template).data)
+
+    def delete(self, request, pk):
+        deleted, _ = CarOrderTemplate.objects.filter(pk=pk).delete()
+        return Response({"ok": bool(deleted)})
 
 
 class CarOrderViewSet(viewsets.ModelViewSet):
@@ -943,6 +1159,18 @@ class CarOrderViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         order = serializer.save(created_by=request.user, status=CarOrder.Status.DRAFT)
         services.record_created(order, request.user)
+        # Direct create: a requester with car_order:create_direct (or a dispatcher
+        # with car_order:approve) skips the draft→pending→approve dance — their own
+        # brand-new order lands straight in the driver queue. This only fast-tracks
+        # the order being created here; it grants no authority over anyone else's
+        # orders (no claim/approve/reject), so a customer never sees driver actions.
+        if user_has_permission(request.user, "car_order:create_direct") or user_has_permission(
+            request.user, "car_order:approve"
+        ):
+            order.status = CarOrder.Status.AWAITING_DRIVER
+            order.save(update_fields=["status", "updated_at"])
+            services.record_sent(order, request.user)
+            services.record_approved(order, request.user)
         return Response(self._read(order), status=status.HTTP_201_CREATED)
 
     def partial_update(self, request, *args, **kwargs):

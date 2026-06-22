@@ -75,6 +75,41 @@ def test_ttl_zero_disables_cache(monkeypatch):
     assert routing._ROUTE_CACHE == {}
 
 
+@override_settings(CAR_ORDER_OSRM_URL="http://osrm.test", CAR_ORDER_ROUTE_CACHE_TTL=0)
+def test_bearing_adds_osrm_bearings_param(monkeypatch):
+    captured = {}
+
+    def _fake_get(url, params=None, timeout=None):
+        captured["params"] = params
+        return _OsrmResp()
+
+    monkeypatch.setattr(routing.requests, "get", _fake_get)
+
+    # With a bearing the start edge is constrained to roughly that heading (so OSRM
+    # can't snap the start onto the oncoming carriageway).
+    routing.estimate_route(41.30, 69.20, 41.40, 69.30, bearing=90)
+    assert captured["params"].get("bearings", "").startswith("90,")
+
+    # Without a bearing (fixed legs) the constraint is absent — unchanged behaviour.
+    routing.estimate_route(41.30, 69.20, 41.40, 69.30)
+    assert "bearings" not in captured["params"]
+
+
+@override_settings(CAR_ORDER_OSRM_URL="http://osrm.test", CAR_ORDER_ROUTE_CACHE_TTL=60)
+def test_bearing_is_part_of_the_cache_key(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_get(*args, **kwargs):
+        calls["n"] += 1
+        return _OsrmResp()
+
+    monkeypatch.setattr(routing.requests, "get", _fake_get)
+
+    routing.estimate_route(41.30, 69.20, 41.40, 69.30, bearing=10)
+    routing.estimate_route(41.30, 69.20, 41.40, 69.30, bearing=200)  # different heading
+    assert calls["n"] == 2  # a different bearing must not reuse the other's route
+
+
 @override_settings(CAR_ORDER_OSRM_URL="http://osrm.test", CAR_ORDER_ROUTE_CACHE_TTL=60)
 def test_callers_cannot_corrupt_the_cache(monkeypatch):
     monkeypatch.setattr(routing.requests, "get", lambda *a, **k: _OsrmResp())

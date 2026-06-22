@@ -10,6 +10,8 @@ from django.urls import include, path, re_path
 
 from car_orders.views import (
     AutoDispatchView,
+    CarOrderTemplateDetailView,
+    CarOrderTemplatesView,
     ClaimCheckBatchView,
     ClaimCheckView,
     admin_approve_overlay,
@@ -21,8 +23,10 @@ from car_orders.views import (
     EstimateView,
     ExtendView,
     FleetLiveView,
+    GeocodeView,
     LiveLocationView,
     MetaBatchView,
+    MyActiveOrderView,
     MyOverlayOrdersView,
     OrderMetaView,
     OverlayClaimView,
@@ -38,11 +42,33 @@ urlpatterns = [
     path("health/", health, name="health"),
     path("healthcheck/", health, name="healthcheck"),
     path("api/v1/car-orders/estimate/", EstimateView.as_view(), name="car-order-estimate"),
+    # Server-side address lookup proxy (keeps the browser off OSM's rate-limited
+    # public server). Before the catch-all so demo never sees it.
+    path("api/v1/car-orders/geocode/", GeocodeView.as_view(), name="car-order-geocode"),
+    # Reusable order «заготовки» (local form-prefill overlay). Before the catch-all
+    # so demo never sees them — the order itself is still created upstream.
+    path(
+        "api/v1/car-orders/templates/",
+        CarOrderTemplatesView.as_view(),
+        name="car-order-templates",
+    ),
+    path(
+        "api/v1/car-orders/templates/<int:pk>/",
+        CarOrderTemplateDetailView.as_view(),
+        name="car-order-template-detail",
+    ),
     path("api/v1/car-orders/fleet/live/", FleetLiveView.as_view(), name="car-order-fleet-live"),
     path(
         "api/v1/car-orders/drivers/me/overlay-orders/",
         MyOverlayOrdersView.as_view(),
         name="car-order-my-overlay-orders",
+    ),
+    # The caller's single active order, reconciled with our overlay. Before the
+    # catch-all so it isn't proxied to demo (which has no such route → 404).
+    path(
+        "api/v1/car-orders/me/active-order/",
+        MyActiveOrderView.as_view(),
+        name="car-order-my-active-order",
     ),
     path(
         "api/v1/car-orders/drivers/me/location/",

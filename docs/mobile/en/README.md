@@ -14,6 +14,7 @@ Per-section docs for integrating a mobile client (Flutter / Kotlin / Swift) with
 8. [Dispatcher console](08-dispatcher.md) — **for the web dispatcher**: run topology, fleet live feed (WS + REST), assigning/reassigning, auto-dispatch toggle, live-map contract.
 9. [Customer order map](09-customer-map.md) — **for the customer/author**: detail → map, order status, own location, route to the meeting point, WebSocket connect/disconnect.
 10. [Fleet map (all orders)](10-fleet-map.md) — **for a mobile dispatcher view**: every active order on one map via the fleet socket, rendering, driverless-order routes, and a "can't connect / nothing shows" troubleshooting table.
+11. [Order templates](11-order-templates.md) — **Flutter build spec**: reusable “заготовки” on the create screen — backend contract, Dart model/repository/providers, and exact create-screen integration (apply prefills the route, never the date/time).
 
 ---
 
