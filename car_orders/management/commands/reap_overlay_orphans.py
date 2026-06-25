@@ -39,7 +39,7 @@ class Command(BaseCommand):
         live_ids = set(OrderLiveLocation.objects.values_list("order_id", flat=True))
         alive = set(
             OrderMeta.objects.filter(order_id__in=live_ids)
-            .exclude(trip_state__in=_TERMINAL)
+            .not_terminal()
             .values_list("order_id", flat=True)
         )
         dead_live = OrderLiveLocation.objects.filter(order_id__in=(live_ids - alive))

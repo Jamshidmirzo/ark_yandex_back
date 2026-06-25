@@ -3,7 +3,37 @@ from django.utils.translation import gettext_lazy as _
 
 from core.models import TimestampMixin
 
-__all__ = ("OrderMeta",)
+__all__ = ("OrderMeta", "OrderMetaQuerySet")
+
+
+class OrderMetaQuerySet(models.QuerySet):
+    """Reusable overlay-order filters. The «active» set (driverless dispatch queue,
+    «1 водитель = 1 активный заказ») is needed in the dispatcher, the GPS uplink,
+    the shift guards and the fleet snapshot, so the filters live here once instead
+    of repeating ``.exclude(trip_state__in=(COMPLETED, CANCELLED))`` at every site."""
+
+    def not_terminal(self):
+        """Drop completed/cancelled orders — what's left is the «active» set."""
+        return self.exclude(
+            trip_state__in=(self.model.TripState.COMPLETED, self.model.TripState.CANCELLED)
+        )
+
+    def for_driver(self, driver_id):
+        return self.filter(driver_id=driver_id)
+
+    def active_for_driver(self, driver_id):
+        """A driver's non-terminal orders — the «1 водитель = 1 активный заказ» set."""
+        return self.for_driver(driver_id).not_terminal()
+
+    def dispatch_queue(self):
+        """Approved, driverless, non-terminal orders that have a pickup — the
+        auto-dispatch queue (see ``dispatch.queue_orders``)."""
+        return self.filter(
+            dispatchable=True,
+            driver_id__isnull=True,
+            origin_lat__isnull=False,
+            origin_lng__isnull=False,
+        ).not_terminal()
 
 
 class OrderMeta(TimestampMixin):
@@ -125,6 +155,8 @@ class OrderMeta(TimestampMixin):
     trip_state = models.CharField(
         max_length=20, choices=TripState.choices, default=TripState.ASSIGNED
     )
+
+    objects = OrderMetaQuerySet.as_manager()
 
     class Meta:
         verbose_name = _("Order meta")

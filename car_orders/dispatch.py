@@ -48,7 +48,7 @@ def active_count_by_driver():
     counts: dict[int, int] = {}
     for did in (
         OrderMeta.objects.filter(driver_id__isnull=False)
-        .exclude(trip_state__in=TERMINAL)
+        .not_terminal()
         .values_list("driver_id", flat=True)
     ):
         counts[did] = counts.get(did, 0) + 1
@@ -130,8 +130,7 @@ def claim(order_id, driver_id, car_id, car_label):
             return False
         # One active order per driver (matches OverlayClaimView / demo).
         busy = (
-            OrderMeta.objects.filter(driver_id=driver_id)
-            .exclude(trip_state__in=TERMINAL)
+            OrderMeta.objects.active_for_driver(driver_id)
             .exclude(order_id=order_id)
             .exists()
         )
@@ -272,14 +271,7 @@ def fresh_positions(max_age_sec, now=None):
 
 def queue_orders():
     """Approved, driverless, non-terminal orders with a pickup — ready to dispatch."""
-    return list(
-        OrderMeta.objects.filter(
-            dispatchable=True,
-            driver_id__isnull=True,
-            origin_lat__isnull=False,
-            origin_lng__isnull=False,
-        ).exclude(trip_state__in=TERMINAL)
-    )
+    return list(OrderMeta.objects.dispatch_queue())
 
 
 def _latest_pos(driver_id):

@@ -396,16 +396,13 @@ class MyOverlayOrdersView(APIView):
     permission_classes = [OverlayAuthenticated]
 
     def get(self, request):
-        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
         # ?include_terminal=1 → the driver's full HISTORY (completed/cancelled too),
         # most-recent-first. Default keeps the active-only board (mobile «Мои заказы»,
         # the dispatcher board) untouched. The web «Заявки на машину» history view
         # opts in: «1 водитель = 1 активный заказ», so without this a driver only ever
         # sees their single live order and never the orders they already finished.
         include_terminal = request.query_params.get("include_terminal") in ("1", "true", "True")
-        qs = OrderMeta.objects.all() if include_terminal else OrderMeta.objects.exclude(
-            trip_state__in=terminal
-        )
+        qs = OrderMeta.objects.all() if include_terminal else OrderMeta.objects.not_terminal()
         order_by = ("-planned_datetime", "-order_id") if include_terminal else (
             "planned_datetime",
             "order_id",
@@ -449,10 +446,8 @@ class MyActiveOrderView(APIView):
         driver_id = acting_driver_id(request, request.query_params.get("driver_id"))
         if not driver_id:
             return Response(None)
-        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
         meta = (
-            OrderMeta.objects.exclude(trip_state__in=terminal)
-            .filter(driver_id=driver_id)
+            OrderMeta.objects.active_for_driver(driver_id)
             .order_by("planned_datetime", "order_id")
             .first()
         )

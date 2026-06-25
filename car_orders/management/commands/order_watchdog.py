@@ -20,8 +20,6 @@ from django.utils import timezone
 from car_orders import scheduling
 from car_orders.models import OrderLiveLocation, OrderMeta
 
-TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-
 
 class Command(BaseCommand):
     help = "Report (and optionally release) at-risk/late overlay orders + GPS-lost trips."
@@ -40,7 +38,7 @@ class Command(BaseCommand):
         now = timezone.now()
         stale_sec = opts["stale_sec"]
 
-        metas = OrderMeta.objects.filter(driver_id__isnull=False).exclude(trip_state__in=TERMINAL)
+        metas = OrderMeta.objects.filter(driver_id__isnull=False).not_terminal()
         at_risk, late, gps_lost = [], [], []
         for m in metas:
             if scheduling.meta_needs_reassign(m, now):

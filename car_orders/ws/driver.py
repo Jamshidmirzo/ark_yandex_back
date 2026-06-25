@@ -98,10 +98,8 @@ class DriverLocationConsumer(AsyncJsonWebsocketConsumer):
             _apply_driver_location(int(driver_id), float(lat), float(lng), "📡 ws", heading=head)
         except (TypeError, ValueError):
             return {}
-        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
         meta = (
-            OrderMeta.objects.filter(driver_id=driver_id)
-            .exclude(trip_state__in=terminal)
+            OrderMeta.objects.active_for_driver(driver_id)
             .order_by("order_id")
             .first()
         )

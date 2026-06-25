@@ -77,8 +77,7 @@ def claim(order_id, driver_id, car_id=None, car_label="", driver_name="", driver
             )
         # One active order per driver — re-claiming the SAME order is idempotent.
         busy = (
-            OrderMeta.objects.filter(driver_id=driver_id)
-            .exclude(trip_state__in=_TERMINAL)
+            OrderMeta.objects.active_for_driver(driver_id)
             .exclude(order_id=int(order_id))
             .first()
         )

@@ -145,8 +145,7 @@ def _apply_driver_location(driver_id, lat, lng, src="", heading=None):
         driver_id=driver_id,
         defaults={"lat": lat, "lng": lng, "heading": heading, "last_seen": now},
     )
-    terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-    metas = list(OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal))
+    metas = list(OrderMeta.objects.active_for_driver(driver_id))
     # Stages where the driver is DRIVING — we keep the route fresh on these.
     moving = (
         OrderMeta.TripState.ASSIGNED,

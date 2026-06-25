@@ -10,8 +10,6 @@ from car_orders.models import OrderLiveLocation, OrderMeta
 from car_orders.serializers import OrderMetaSerializer
 from car_orders.services.status import effective_status, status_map_for
 
-TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-
 
 def _planned_geometry(meta):
     """The pickup → destination route for an order with no live position YET — so the
@@ -46,7 +44,7 @@ def _planned_geometry(meta):
 def fleet_live_orders(request=None):
     # Every non-terminal overlay order, INCLUDING ones still awaiting a driver
     # (driver_id is None) — the dispatcher needs to see those to assign them.
-    metas = list(OrderMeta.objects.exclude(trip_state__in=TERMINAL))
+    metas = list(OrderMeta.objects.not_terminal())
     # Index started trips per driver ONCE, so each order's at_risk is computed in
     # memory instead of a query per order (no N+1 over the fleet).
     active_by_driver: dict = {}

@@ -72,12 +72,7 @@ class DriverShiftView(APIView):
         changing = existing is not None and existing.car_id != new_car_id
 
         if changing:
-            terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-            active = (
-                OrderMeta.objects.filter(driver_id=driver_id)
-                .exclude(trip_state__in=terminal)
-                .count()
-            )
+            active = OrderMeta.objects.active_for_driver(driver_id).count()
             if active:
                 return _bad_request(
                     "HAS_ACTIVE_ORDERS",
@@ -106,10 +101,7 @@ class DriverShiftView(APIView):
             return Response(None)
         # Don't strand an in-flight order: refuse to end the shift while the driver
         # still has an active (non-terminal) order — finish or hand it off first.
-        terminal = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
-        active = (
-            OrderMeta.objects.filter(driver_id=driver_id).exclude(trip_state__in=terminal).count()
-        )
+        active = OrderMeta.objects.active_for_driver(driver_id).count()
         if active:
             return _bad_request(
                 "HAS_ACTIVE_ORDERS",
