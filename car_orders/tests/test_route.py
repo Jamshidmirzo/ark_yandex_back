@@ -173,7 +173,7 @@ def _setup_moving_order(monkeypatch, order_id, driver_id):
     )
     DriverPosition.objects.create(driver_id=driver_id, lat=41.34, lng=69.30, last_seen=timezone.now())
     captured = []
-    monkeypatch.setattr(views, "broadcast_location", lambda oid, data: captured.append(data))
+    monkeypatch.setattr(views.tracking, "broadcast_location", lambda oid, data: captured.append(data))
     monkeypatch.setattr("car_orders.dispatch.push_order_route", lambda *a, **k: None)
     return views, captured
 

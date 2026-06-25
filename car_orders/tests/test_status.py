@@ -184,7 +184,7 @@ def test_overlay_rows_backfill_demo_status_when_unmirrored(monkeypatch):
         order_id=777_001, driver_id=drv.id, overlay_claimed=True, trip_state=TS.IN_TRIP
     )
     monkeypatch.setattr(
-        views,
+        views.proxy,
         "_all_demo_orders",
         lambda req: {777_001: {"id": 777_001, "status": "awaiting_driver"}},
     )
@@ -213,7 +213,7 @@ def test_fleet_live_orders_backfill_demo_status_when_unmirrored(monkeypatch):
         order_id=777_002, driver_id=drv.id, overlay_claimed=True, trip_state=TS.IN_TRIP
     )
     monkeypatch.setattr(
-        views,
+        views.proxy,
         "_all_demo_orders",
         lambda req: {777_002: {"id": 777_002, "status": "awaiting_driver"}},
     )
@@ -283,7 +283,7 @@ def test_our_orders_list_returns_only_overlay_orders(monkeypatch):
         o2.pk: {"id": o2.pk, "status": "pending", "address": "B"},
         999_999: {"id": 999_999, "status": "pending", "address": "demo-only"},
     }
-    monkeypatch.setattr(views, "_all_demo_orders", lambda req: fake_bodies)
+    monkeypatch.setattr(views.proxy, "_all_demo_orders", lambda req: fake_bodies)
 
     resp = views.car_order_proxy(RequestFactory().get("/api/v1/car-orders/"))
     data = json.loads(resp.content)

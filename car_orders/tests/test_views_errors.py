@@ -42,7 +42,7 @@ def test_dispatcher_assign_snapshots_driver_from_hr(monkeypatch):
     import car_orders.views as views
 
     monkeypatch.setattr(
-        views, "_driver_snapshot", lambda request, driver_id: ("Иван Водитель", "+998901234567")
+        views.overlay, "_driver_snapshot", lambda request, driver_id: ("Иван Водитель", "+998901234567")
     )
     OrderMeta.objects.create(order_id=905)
     r = APIClient().post(
@@ -66,7 +66,7 @@ def test_self_claim_snapshot_is_not_overwritten_by_hr_fetch(monkeypatch):
         called["hit"] = True
         return ("Should", "NotWin")
 
-    monkeypatch.setattr(views, "_driver_snapshot", _boom)
+    monkeypatch.setattr(views.overlay, "_driver_snapshot", _boom)
     OrderMeta.objects.create(order_id=906)
     r = APIClient().post(
         "/api/v1/car-orders/906/overlay-claim/",
