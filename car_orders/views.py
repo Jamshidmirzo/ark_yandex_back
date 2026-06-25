@@ -136,6 +136,9 @@ def admin_approve_overlay(request, pk):
         # can't re-raise. Log it LOUDLY so the split-brain is alertable, not silent.
         try:
             OrderMeta.objects.update_or_create(order_id=int(pk), defaults={"dispatchable": True})
+            # The order just entered the dispatch queue → start the «поиск водителя»
+            # clock (idempotent: a re-approve won't reset an already-running search).
+            services.overlay.mark_searching(int(pk))
         except Exception:
             logger.exception(
                 "car_orders: demo approve succeeded but overlay update FAILED for order %s "
@@ -167,6 +170,311 @@ def reject_overlay(request, pk):
                 "— rejected order may keep auto-dispatching", pk
             )
     return resp
+
+
+def _inject_effective_status(payload):
+    """Decorate a proxied demo car-order payload with our reconciled ``effective_status``.
+
+    The base CarOrder list/detail lives upstream (demo) and is reverse-proxied, so the
+    demo ``status`` is ALREADY in the body — we just join each row with its local
+    ``OrderMeta`` and compute the single source-of-truth status ONCE on the server (no
+    extra upstream call). Every client then shows the same thing instead of re-deriving
+    it (which had drifted: a claimed order read «Ожидает водителя» on web while mobile
+    showed «В процессе»/the trip stage). Handles the three shapes demo returns: a single
+    order dict, a bare list, or a paginated ``{results: [...]}``. One local query.
+    """
+    from car_orders.services.status import effective_status
+
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        rows = payload["results"]
+    elif isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict) and "status" in payload:
+        rows = [payload]
+    else:
+        return payload  # unrecognised shape — leave it untouched
+    ids = [r["id"] for r in rows if isinstance(r, dict) and r.get("id") is not None]
+    metas = {m.order_id: m for m in OrderMeta.objects.filter(order_id__in=ids)}
+    for r in rows:
+        if isinstance(r, dict):
+            r["effective_status"] = effective_status(r.get("status"), metas.get(r.get("id")))
+    return payload
+
+
+# Short per-process cache of the full demo order set (keyed by bearer token so one
+# user's visible orders never leak to another). The "our orders" list pages through
+# demo to fetch order bodies; this stops every list load / pagination step from
+# re-paging the whole upstream. TTL is small so a demo-side status change shows fast.
+_DEMO_ORDERS_CACHE: dict = {}
+_DEMO_ORDERS_TTL = 8.0
+
+
+def _snapshot_descriptive(bodies):
+    """Lazily snapshot demo-only DESCRIPTIVE fields (project / note / car-type /
+    creator / destination address) from the demo ``bodies`` onto the EXISTING
+    OrderMeta rows.
+
+    Why: a driver/customer can't read the demo body of an order managed via our
+    overlay (the detail proxy 404s — see ``CarOrderViewSet.get_queryset``), so the
+    clients fall back to rebuilding the card from OrderMeta. OrderMeta only stored
+    coords/window/driver-snapshot, so the card was missing project/note/car-type/
+    creator/address. We fill them here from the bodies a PRIVILEGED client (the
+    dispatcher board) already pages — so the next overlay fallback shows full info.
+
+    Only fills BLANK fields on rows we already manage (never creates a row), so it's
+    idempotent and a no-op once filled. Best-effort: enrichment only, never on the
+    critical path of serving the list, so any failure is logged and swallowed."""
+    if not bodies:
+        return
+    blank = (
+        models.Q(project_name="") | models.Q(note="") | models.Q(car_type_name="")
+        | models.Q(created_by_name="") | models.Q(dest_address="")
+    )
+    for m in OrderMeta.objects.filter(order_id__in=list(bodies.keys())).filter(blank):
+        body = bodies.get(m.order_id)
+        if not isinstance(body, dict):
+            continue
+        changed = []
+
+        def _fill(field, value, limit=None):
+            if value and not getattr(m, field):
+                setattr(m, field, value[:limit] if (limit and isinstance(value, str)) else value)
+                changed.append(field)
+
+        _fill("project_name", body.get("project_name"), 500)
+        _fill("note", body.get("note"))
+        ct = body.get("car_type")
+        _fill("car_type_name", ct.get("name") if isinstance(ct, dict) else None, 255)
+        cb = body.get("created_by")
+        _fill("created_by_name", cb.get("name") if isinstance(cb, dict) else None, 255)
+        _fill("dest_address", body.get("address"), 500)
+        if changed:
+            try:
+                m.save(update_fields=changed)
+            except Exception:
+                logger.exception(
+                    "car_orders: descriptive snapshot save failed for order %s", m.order_id
+                )
+
+
+def _all_demo_orders(request):
+    """``{id: order_body}`` for every demo order the caller can see — paged from the
+    upstream list (50/page) and cached briefly per token. Used to render the
+    «only our orders» list with full bodies (address/project/client live in the demo
+    body, not in our OrderMeta)."""
+    import json
+    import time
+    from urllib.parse import urlsplit
+
+    from config.gateway import gateway
+
+    token = request.META.get("HTTP_AUTHORIZATION", "")
+    now = time.time()
+    hit = _DEMO_ORDERS_CACHE.get(token)
+    if hit and hit[0] > now:
+        return hit[1]
+
+    bodies: dict = {}
+    orig_qs = request.META.get("QUERY_STRING", "")
+    try:
+        # Follow demo's OWN `next` link (it paginates by limit/offset, not ?page=), so
+        # we walk every page instead of re-fetching the first. The gateway appends
+        # request.QUERY_STRING to the upstream URL, so we drive paging through it.
+        qs = "page_size=50"
+        for _ in range(60):  # safety cap (60 × 50 = 3000 orders)
+            request.META["QUERY_STRING"] = qs
+            resp = gateway(request, "car-orders/")
+            if not (200 <= resp.status_code < 300):
+                break
+            try:
+                data = json.loads(resp.content)
+            except (ValueError, TypeError):
+                break
+            results = data.get("results") if isinstance(data, dict) else data
+            if not isinstance(results, list):
+                break
+            for o in results:
+                if isinstance(o, dict) and o.get("id") is not None:
+                    bodies[o["id"]] = o
+            nxt = data.get("next") if isinstance(data, dict) else None
+            if not nxt:
+                break
+            qs = urlsplit(nxt).query  # demo's real next-page query (limit/offset)
+    finally:
+        request.META["QUERY_STRING"] = orig_qs
+
+    # Enrich our overlay rows from the bodies we just paged (this caller can see them),
+    # so an order the requester later can't read still shows full info via the fallback.
+    _snapshot_descriptive(bodies)
+
+    # Drop expired entries so the cache can't grow unbounded across rotating tokens.
+    for k in [k for k, (exp, _) in _DEMO_ORDERS_CACHE.items() if exp <= now]:
+        _DEMO_ORDERS_CACHE.pop(k, None)
+    _DEMO_ORDERS_CACHE[token] = (now + _DEMO_ORDERS_TTL, bodies)
+    return bodies
+
+
+def _fill_demo_statuses(status_map, order_ids, request):
+    """Backfill ``status_map`` (order_id → demo status) for ids the LOCAL ``CarOrder``
+    mirror couldn't resolve, by pulling the demo body from upstream — the SAME source
+    the proxied list uses. Without this the OrderMeta-only feeds (overlay board / fleet
+    snapshot) return ``effective_status=null`` for every order that lives only upstream,
+    and the clients each reconcile it differently (the cross-client «wrong status» bug).
+
+    Mutates and returns ``status_map``. No-op without a ``request`` (the request-less WS
+    refresh keeps its local-only behaviour) or when the upstream body isn't
+    visible/reachable — so it degrades to today's behaviour, never crashes."""
+    if request is None:
+        return status_map
+    missing = [oid for oid in order_ids if status_map.get(oid) is None]
+    if not missing:
+        return status_map
+    bodies = _all_demo_orders(request)
+    for oid in missing:
+        body = bodies.get(oid)
+        if isinstance(body, dict) and body.get("status") is not None:
+            status_map[oid] = body["status"]
+    return status_map
+
+
+def _driver_snapshot(request, driver_id):
+    """``(name, phone)`` for ``driver_id`` from upstream HR (``/employees/{id}/``).
+
+    A driver self-claim captures its OWN name+phone client-side and sends them on the
+    claim. A DISPATCHER manual assign can't — the dispatcher's client doesn't hold the
+    chosen driver's HR record — so the snapshot came back empty and the order showed no
+    driver (name/phone blank on the live-track / detail card). The dispatcher's token DOES
+    have employee-read access, so we fetch it here with that token and snapshot it the
+    same way, fixing BOTH dispatcher clients (web + mobile) in one place.
+
+    Best-effort: returns ``("", "")`` with no token (tests / open-dev without a bearer),
+    no driver, or any upstream failure — i.e. exactly today's behaviour, never a crash.
+    A direct GET (NOT ``config.gateway.gateway``, which would forward this request's POST
+    method + body to the employees endpoint)."""
+    token = request.META.get("HTTP_AUTHORIZATION", "")
+    if not token or not driver_id:
+        return "", ""
+    import requests
+    from django.conf import settings
+
+    base = settings.UPSTREAM_API_BASE.rstrip("/")
+    try:
+        resp = requests.get(
+            f"{base}/employees/{driver_id}/",
+            headers={"Authorization": token, "Accept": "application/json"},
+            timeout=settings.UPSTREAM_TIMEOUT,
+        )
+        if 200 <= getattr(resp, "status_code", 0) < 300:
+            body = resp.json()
+            if isinstance(body, dict):
+                return body.get("name") or "", body.get("phone") or ""
+    except (requests.RequestException, ValueError, TypeError):
+        pass
+    return "", ""
+
+
+def _our_orders_list(request):
+    """The car-order LIST narrowed to OUR orders only — every order that has a local
+    ``OrderMeta`` (i.e. the overlay touched it: coords / claim / dispatch / trip). Plain
+    demo-only orders (no OrderMeta) are excluded, so the list matches the dispatcher and
+    «forgets demo». Each row is the full demo body + our reconciled ``effective_status``.
+    Re-paginated server-side (page / page_size) since we filter the upstream set."""
+    from django.http import JsonResponse
+
+    from car_orders.services.status import effective_status
+
+    metas = {m.order_id: m for m in OrderMeta.objects.all()}
+    bodies = _all_demo_orders(request)
+    rows = []
+    for oid, m in metas.items():
+        body = bodies.get(oid)
+        if not isinstance(body, dict):
+            continue  # our order whose demo body the caller can't see / is gone
+        b = dict(body)
+        b["effective_status"] = effective_status(b.get("status"), m)
+        rows.append(b)
+    # Newest first (planned pickup, then id) — a sensible default for the board.
+    rows.sort(key=lambda b: (b.get("planned_datetime") or "", b.get("id") or 0), reverse=True)
+
+    # Apply the client's filters locally (we fetched the whole set, not a demo page).
+    st = request.GET.get("status")
+    if st:
+        rows = [b for b in rows if st in (b.get("effective_status"), b.get("status"))]
+    q = (request.GET.get("search") or "").strip().lower()
+    if q:
+        rows = [
+            b for b in rows
+            if q in (b.get("address") or "").lower()
+            or q in str(b.get("project_name") or "").lower()
+            or q in str(b.get("id") or "")
+        ]
+
+    def _int(name, default):
+        try:
+            return max(1, int(request.GET.get(name, default)))
+        except (TypeError, ValueError):
+            return default
+
+    total = len(rows)
+    page = _int("page", 1)
+    page_size = _int("page_size", 20)
+    start = (page - 1) * page_size
+    page_rows = rows[start:start + page_size]
+
+    def _url(p):
+        if p < 1 or (p - 1) * page_size >= total:
+            return None
+        return f"{request.path}?page={p}&page_size={page_size}"
+
+    return JsonResponse(
+        {"count": total, "next": _url(page + 1), "previous": _url(page - 1), "results": page_rows}
+    )
+
+
+@csrf_exempt
+def car_order_proxy(request, pk=None):
+    """Reverse-proxy the demo car-order LIST (``/car-orders/``) and DETAIL
+    (``/car-orders/<pk>/``).
+
+    - LIST GET → ONLY our orders (those with a local OrderMeta), each as the full demo
+      body + reconciled ``effective_status``, re-paginated server-side. Demo-only orders
+      are hidden so every surface shows the same «our» set (see ``_our_orders_list``).
+    - DETAIL GET → proxy demo + inject ``effective_status``.
+    - Non-GET (create / update / delete) and any non-2xx/non-JSON → pass straight through.
+
+    The base CarOrder lives upstream, so this view sits before the gateway catch-all and
+    is the single source of truth for order status across web + mobile."""
+    import json
+
+    from django.http import HttpResponse
+
+    from config.gateway import gateway
+
+    if pk is None and request.method == "GET":
+        return _our_orders_list(request)
+
+    path = "car-orders/" if pk is None else f"car-orders/{pk}/"
+    resp = gateway(request, path)
+    if request.method != "GET" or not (200 <= resp.status_code < 300):
+        return resp
+    if "application/json" not in resp.get("Content-Type", ""):
+        return resp
+    try:
+        payload = json.loads(resp.content)
+    except (ValueError, TypeError):
+        return resp
+    _inject_effective_status(payload)
+    out = HttpResponse(
+        json.dumps(payload),
+        status=resp.status_code,
+        content_type=resp.get("Content-Type", "application/json"),
+    )
+    # Preserve the upstream response headers for parity (the gateway already strips
+    # Content-Length/-Encoding, so Django recomputes them for our re-serialized body).
+    for key, value in resp.items():
+        if key.lower() != "content-type":
+            out[key] = value
+    return out
 
 
 def _notify_dropped_driver(driver_id, order_id):
@@ -275,7 +583,7 @@ class FleetLiveView(APIView):
     def get(self, request):
         from car_orders.fleet import fleet_live_orders
 
-        return Response({"orders": fleet_live_orders()})
+        return Response({"orders": fleet_live_orders(request)})
 
 
 class LiveLocationView(APIView):
@@ -377,6 +685,9 @@ class OrderMetaView(APIView):
             for field in self._PROTECTED_FIELDS:
                 data.pop(field, None)
         meta, _created = OrderMeta.objects.update_or_create(order_id=pk, defaults=data)
+        # Direct-create / dispatcher set dispatchable here → start the «поиск водителя»
+        # clock (idempotent; only while still driverless).
+        services.overlay.mark_searching(pk)
         return Response(OrderMetaSerializer(meta).data)
 
     def delete(self, request, pk):
@@ -497,11 +808,19 @@ class OverlayClaimView(APIView):
         # self-claims their own (token). NOT the acting user, or a dispatcher's
         # assignment would be claimed for the dispatcher.
         driver_id = assignee_driver_id(request, self)
+        driver_name = request.data.get("driver_name", "")
+        driver_phone = request.data.get("driver_phone", "")
+        # Dispatcher manual assign sends no driver snapshot (it doesn't hold the chosen
+        # driver's HR record), so fill it server-side with the dispatcher's token — else
+        # the assigned order shows a blank driver. A self-claim already passes both, so
+        # this only fires for the (otherwise blank) dispatcher path.
+        if not driver_name and not driver_phone:
+            driver_name, driver_phone = _driver_snapshot(request, driver_id)
         try:
             meta = services.overlay.claim(
                 pk, driver_id, request.data.get("car_id"), request.data.get("car_label", ""),
-                driver_name=request.data.get("driver_name", ""),
-                driver_phone=request.data.get("driver_phone", ""),
+                driver_name=driver_name,
+                driver_phone=driver_phone,
             )
         except services.overlay.OverlayError as exc:
             return _service_error_response(exc)
@@ -562,6 +881,35 @@ class OverlayReleaseView(APIView):
         if meta is None:
             return Response({"ok": True})
         return Response({"ok": True, "meta": OrderMetaSerializer(meta).data})
+
+
+class NoShowView(APIView):
+    """«Клиент не вышел» — the driver (or a dispatcher) cancels an order whose client
+    never came out at the pickup. Only valid while ``trip_state == at_client`` (the
+    pickup-wait stage; usually past the wait threshold, but the threshold is a UI
+    nudge — the server allows it whenever waiting). Tears down the overlay, mirrors
+    the native cancel and audits the no-show. Body: none → ``{ok, waited_s, meta}``."""
+
+    authentication_classes = [DemoTokenAuthentication]
+    # Same gate as overlay-release: the assigned driver (own order) or a dispatcher.
+    permission_classes = [OverlayDriverOrDispatcher]
+
+    def post(self, request, pk):
+        # request.user is a demo-bridged DemoUser (not a persisted row); the audit FK
+        # needs a real User, so resolve one by id when it exists locally, else None.
+        actor = User.objects.filter(pk=getattr(request.user, "pk", None)).first()
+        try:
+            meta, waited_s = services.overlay.cancel_no_show(
+                pk,
+                actor=actor,
+                actor_driver_id=acting_driver_id(request),
+                is_dispatcher=OverlayDispatcher().has_permission(request, self),
+            )
+        except services.overlay.OverlayError as exc:
+            return _service_error_response(exc)
+        return Response(
+            {"ok": True, "waited_s": waited_s, "meta": OrderMetaSerializer(meta).data}
+        )
 
 
 class ExtendView(APIView):
@@ -949,6 +1297,36 @@ class DriverPositionsView(APIView):
         )
 
 
+def _overlay_rows(metas, request=None):
+    """Serialize overlay ``metas`` and decorate each row with the reconciled
+    ``effective_status`` (+ the raw demo ``status``) — the SAME single source of truth
+    the order list/detail and mobile use. The metas are evaluated once and the backing
+    statuses fetched in one batched query (no N+1); ``ListSerializer`` preserves order,
+    so we can zip the model instances with their serialized rows.
+
+    Orders usually live only upstream (no local ``CarOrder`` mirror), so when a
+    ``request`` is supplied we backfill their demo status from the upstream bodies —
+    otherwise the board would read ``effective_status=null`` and each client would
+    reconcile it on its own (drifting). See ``_fill_demo_statuses``."""
+    from car_orders.services.status import effective_status, status_map_for
+
+    metas = list(metas)
+    order_ids = [m.order_id for m in metas]
+    status_map = status_map_for(order_ids)
+    _fill_demo_statuses(status_map, order_ids, request)
+    rows = OrderMetaSerializer(metas, many=True).data
+    out = []
+    for m, data in zip(metas, rows):
+        raw = status_map.get(m.order_id)
+        eff = effective_status(raw, m)
+        # `status` falls back to the reconciled `effective_status` when the raw demo
+        # status can't be read (an overlay-only order whose upstream body is unreadable —
+        # e.g. a finished ride in a driver's history). Clients that gate a status badge on
+        # `status != null` (the mobile cards) then still render it, NOT a blank.
+        out.append({**data, "status": raw or eff, "effective_status": eff})
+    return out
+
+
 class MyOverlayOrdersView(APIView):
     """Active orders from our overlay (both demo-claimed and overlay-claimed carry
     driver_id on OrderMeta). Role-scoped, so it powers BOTH the driver's «Мои
@@ -989,7 +1367,7 @@ class MyOverlayOrdersView(APIView):
             # driver via ?driver_id=.
             if requested:
                 qs = qs.filter(driver_id=requested)
-            return Response(OrderMetaSerializer(qs.order_by(*order_by), many=True).data)
+            return Response(_overlay_rows(qs.order_by(*order_by), request=request))
 
         # Driver: only their own. Identity is the token's user when enforced, so a
         # spoofed ?driver_id= can't enumerate another driver's orders.
@@ -997,7 +1375,7 @@ class MyOverlayOrdersView(APIView):
         if not driver_id:
             return Response([])
         qs = qs.filter(driver_id=driver_id).order_by(*order_by)
-        return Response(OrderMetaSerializer(qs, many=True).data)
+        return Response(_overlay_rows(qs, request=request))
 
 
 class MyActiveOrderView(APIView):
@@ -1031,27 +1409,59 @@ class MyActiveOrderView(APIView):
         if not meta:
             return Response(None)
 
+        import json
+
+        from car_orders.services.status import effective_status
+        from config.gateway import gateway
+
         overlay = OrderMetaSerializer(meta).data
         # Pull the base order body from demo and reconcile our assignment onto it, so
         # the order doesn't read as the stale demo «Ожидает водителя / без водителя».
-        from config.gateway import gateway
-
+        order = None
         resp = gateway(request, f"car-orders/{meta.order_id}/")
         if 200 <= resp.status_code < 300:
             try:
-                import json
-
-                order = json.loads(resp.content)
+                body = json.loads(resp.content)
             except (ValueError, TypeError):
-                order = None
-            if isinstance(order, dict):
-                order["trip_state"] = meta.trip_state
-                order["driver_id"] = meta.driver_id
-                order["overlay"] = overlay
-                return Response(order)
-        # Upstream body unavailable (deleted/unreachable) — the overlay alone still
-        # tells the client they have an active order rather than 404-ing.
-        return Response(overlay)
+                body = None
+            if isinstance(body, dict):
+                order = body
+        if order is None:
+            # A MANUAL assignment keeps the demo order at driver=null, so the assignee
+            # often can't read it via the single-order GET (403/404) → fall back to the
+            # demo LIST bodies (the SAME source the order list already renders from,
+            # cached per token), which the driver CAN see while it's awaiting.
+            order = _all_demo_orders(request).get(meta.order_id)
+
+        if isinstance(order, dict):
+            order = dict(order)
+            order["trip_state"] = meta.trip_state
+            order["driver_id"] = meta.driver_id
+            order["effective_status"] = effective_status(order.get("status"), meta)
+            order["overlay"] = overlay
+            return Response(order)
+
+        # No demo body anywhere — return an object that still MATCHES the client's
+        # CarOrderModel shape (id, status, coords, planned_datetime) instead of the raw
+        # overlay, whose `order_id`/missing `id`/`status` mismatched the model and left
+        # the card blank («модели не сходятся»). Address/project text isn't in the
+        # overlay, so those stay empty — but the card renders id + status + route + time.
+        from car_orders.models import CarOrder
+
+        active = (
+            CarOrder.Status.IN_PROGRESS
+            if meta.overlay_claimed
+            else CarOrder.Status.AWAITING_DRIVER
+        )
+        return Response({
+            **overlay,
+            "id": meta.order_id,
+            "status": active,
+            "effective_status": active,
+            "trip_state": meta.trip_state,
+            "driver_id": meta.driver_id,
+            "overlay": overlay,
+        })
 
 
 class CarOrderTemplatesView(APIView):
@@ -1131,6 +1541,19 @@ class CarOrderViewSet(viewsets.ModelViewSet):
         if self.action == "activity":
             return CarOrderActivitySerializer
         return CarOrderSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        # Batch the overlay metas for a LIST so CarOrderSerializer.effective_status
+        # resolves without an N+1 (one query for the filtered set, not per row).
+        if self.action == "list":
+            ids = list(
+                self.filter_queryset(self.get_queryset()).values_list("pk", flat=True)
+            )
+            ctx["metas_by_order_id"] = {
+                m.order_id: m for m in OrderMeta.objects.filter(order_id__in=ids)
+            }
+        return ctx
 
     # Per-action permissions. Centralised here because overriding
     # get_permissions bypasses any permission_classes set on @action.

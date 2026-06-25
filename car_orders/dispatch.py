@@ -18,6 +18,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from car_orders.geometry import MAX_LEG_KM, downsample, haversine_km, trim_geometry
@@ -86,13 +87,21 @@ def rank_drivers(car_type_id, pickup, shifts, positions, load, max_load=1, exclu
     return out
 
 
-def is_due(meta, first_seen, now, lead_min, stale_sec):
+def is_due(meta, first_seen, now, lead_min, stale_sec, has_ideal=False):
     """Is it time to auto-assign this order? Urgent → now; scheduled → within
-    ``lead_min`` of the pickup; ASAP (no time) → after waiting ``stale_sec``."""
+    ``lead_min`` of the pickup; ASAP (no time) → the moment an IDEAL driver is
+    already free (``has_ideal``), otherwise after waiting ``stale_sec``.
+
+    The ASAP stale wait exists to give a closer driver time to come online before we
+    grab the first one — but when a suitable car is ALREADY sitting idle there's
+    nothing to wait for, so we assign at once (a freshly-created «сейчас» order
+    shouldn't sit 3 min while the dispatcher sees the driver as «подходит»)."""
     if meta.is_urgent:
         return True
     if meta.planned_datetime:
         return meta.planned_datetime - now <= timedelta(minutes=lead_min)
+    if has_ideal:
+        return True
     seen = first_seen.get(meta.order_id, now)
     return (now - seen) >= timedelta(seconds=stale_sec)
 
@@ -139,6 +148,116 @@ def claim(order_id, driver_id, car_id, car_label):
     notify_order_status(meta, OrderMeta.TripState.ASSIGNED)
     push_order_route(meta)  # send the approach route the moment it's assigned
     return True
+
+
+def _is_abandoned(m, now, cutoff, last_seen) -> bool:
+    """A driver is ABANDONED on order ``m`` when ALL hold:
+      • the order is still ASSIGNED — claimed but the driver NEVER set off. We never
+        reap a started order (to_client/at_client/in_trip/at_destination/waiting): once
+        the driver has engaged the customer, only a human unwinds it. Crucially this
+        also means we never yank a driver legitimately parked for hours during a shoot
+        (at_destination / waiting) on a benign GPS gap.
+      • it isn't a scheduled order still waiting for a FUTURE pickup (assigned early
+        within the lead window) — only reap once its pickup time has arrived/passed.
+      • it's been stuck in ASSIGNED ≥ ``abandon_sec`` (updated_at ≤ cutoff), so a fresh
+        assignment isn't reaped before the driver can react.
+      • the driver is DARK — no GPS fix for ≥ ``abandon_sec`` (an online driver, who
+        heartbeats even while parked, is never reaped; a present-but-idle driver is left
+        for the dispatcher to reassign by hand)."""
+    if m.trip_state != OrderMeta.TripState.ASSIGNED:
+        return False
+    if m.planned_datetime is not None and m.planned_datetime > now:
+        return False
+    if m.updated_at is not None and m.updated_at > cutoff:
+        return False
+    seen = last_seen.get(m.driver_id)
+    return seen is None or seen <= cutoff
+
+
+def reap_abandoned(now=None, *, abandon_sec=None):
+    """Free drivers pinned by an order they've ABANDONED, so a long-dead claim can't
+    keep a driver «busy» forever (the «водитель свободен/подходит, но новый заказ не
+    назначается» trap). An ASSIGNED-but-never-started order whose driver has gone dark
+    for ``abandon_sec`` is requeued — the driver is unpinned and the order goes back to
+    the queue for someone online. Returns the list of ``(order_id, driver_id)`` freed.
+    ``abandon_sec=0`` disables it. See :func:`_is_abandoned` for the exact (deliberately
+    conservative) rule.
+
+    Requeues with a plain ``release`` (no permanent driver exclusion): a dark driver
+    ranks LAST anyway (no fresh GPS → unknown distance), so when any live driver exists
+    the order goes to them; only when the dark driver is the sole candidate does it bounce
+    back — and the ``updated_at`` guard then keeps it from re-reaping for another full
+    window, so there's no thrash and no single-driver starvation."""
+    from car_orders import concurrency
+    from car_orders.services import overlay
+
+    now = now or timezone.now()
+    if abandon_sec is None:
+        abandon_sec = getattr(settings, "CAR_ORDER_ABANDON_SEC", 60 * 60)
+    if not abandon_sec:
+        return []
+    cutoff = now - timedelta(seconds=abandon_sec)
+    last_seen = dict(DriverPosition.objects.values_list("driver_id", "last_seen"))
+    candidates = [
+        (m.order_id, m.driver_id)
+        for m in OrderMeta.objects.filter(
+            trip_state=OrderMeta.TripState.ASSIGNED, driver_id__isnull=False
+        )
+        if _is_abandoned(m, now, cutoff, last_seen)
+    ]
+    freed = []
+    for order_id, did in candidates:
+        # Re-validate under the SAME per-driver advisory lock claim/advance take, so a
+        # concurrent «to_client» tap (or a claim) committed since we scanned isn't lost
+        # — only requeue if the order is STILL an abandoned ASSIGNED pin on this driver.
+        with transaction.atomic():
+            concurrency.lock_driver(did)
+            m = OrderMeta.objects.select_for_update().filter(order_id=order_id).first()
+            # Re-read this driver's GPS recency too — they may have come back online
+            # between the scan and now (which would make the order no longer abandoned).
+            ls = DriverPosition.objects.filter(driver_id=did).values_list("last_seen", flat=True).first()
+            if m is None or m.driver_id != did or not _is_abandoned(m, now, cutoff, {did: ls}):
+                continue
+            overlay.release(order_id, requeue=True, is_dispatcher=True)
+        freed.append((order_id, did))
+    return freed
+
+
+def fill_missing_addresses(limit=2):
+    """Reverse-geocode «откуда / куда» onto overlay orders that have coords but no
+    address text yet, so every client shows the route as TEXT (not «—») — including an
+    overlay-only order with no demo CarOrder body to read the address from (the
+    «в активном заказе откуда/куда стоит —» bug). Idempotent and bounded per pass; the
+    geocoder is cached, so each point costs one lookup once. Returns the count filled.
+
+    Kept SMALL per pass and run AFTER the assign pass so the (throttled) Nominatim
+    lookups never delay auto-dispatch."""
+    from car_orders.services import geocode
+
+    # Includes TERMINAL orders: a finished/cancelled ride still needs its «откуда/куда»
+    # for the driver's history list (it never auto-dispatches again, so leaving it blank
+    # is fine for dispatch but shows «—» in history). Bounded + idempotent.
+    qs = OrderMeta.objects.filter(
+        Q(origin_address="", origin_lat__isnull=False, origin_lng__isnull=False)
+        | Q(dest_address="", address_lat__isnull=False, address_lng__isnull=False)
+    )[:limit]
+    filled = 0
+    for m in qs:
+        changed = []
+        if not m.origin_address and m.origin_lat is not None and m.origin_lng is not None:
+            label = geocode.reverse(m.origin_lat, m.origin_lng)
+            if label:
+                m.origin_address = label[:500]
+                changed.append("origin_address")
+        if not m.dest_address and m.address_lat is not None and m.address_lng is not None:
+            label = geocode.reverse(m.address_lat, m.address_lng)
+            if label:
+                m.dest_address = label[:500]
+                changed.append("dest_address")
+        if changed:
+            m.save(update_fields=changed)
+            filled += 1
+    return filled
 
 
 def fresh_positions(max_age_sec, now=None):
@@ -337,18 +456,33 @@ def run_once(first_seen, now=None, *, lead_min, stale_sec, pos_max_age, max_load
     positions = fresh_positions(pos_max_age, now)
     load = active_count_by_driver()
     assigned = []
-    for meta in queue_orders():
+    # Claim scarce ideal drivers in PRIORITY order: urgent first, then scheduled by
+    # soonest pickup, then ASAP oldest-first. Without this, now that an ASAP order with
+    # a free ideal driver assigns immediately (Fix A), a fresh ASAP order earlier in the
+    # default scan order could grab the only suitable car ahead of a due urgent/scheduled
+    # one. (DB-agnostic Python sort — SQLite/Postgres order NULLs differently.)
+    def _priority(meta):
+        if meta.is_urgent:
+            return (0, meta.updated_at or now)
+        if meta.planned_datetime:
+            return (1, meta.planned_datetime)
+        return (2, meta.updated_at or now)
+
+    for meta in sorted(queue_orders(), key=_priority):
         # AUDIT M6: seed «first seen» from the order's persisted updated_at (≈ when it
         # entered the queue) rather than `now`, so a worker restart doesn't reset every
         # ASAP order's stale clock and indefinitely defer its dispatch.
         first_seen.setdefault(meta.order_id, meta.updated_at or now)
-        if not is_due(meta, first_seen, now, lead_min, stale_sec):
-            continue
+        # Rank BEFORE the due-gate: knowing an IDEAL driver is already free lets an
+        # ASAP order skip the stale wait and assign on this very pass.
         ranked = rank_drivers(
             meta.car_type_id, (meta.origin_lat, meta.origin_lng), shifts, positions, load, max_load,
             excluded=set(meta.excluded_driver_ids or []),
         )
-        if not ranked or ranked[0][4] != "":  # no candidate, or best isn't ideal
+        has_ideal = bool(ranked) and ranked[0][4] == ""
+        if not is_due(meta, first_seen, now, lead_min, stale_sec, has_ideal=has_ideal):
+            continue
+        if not has_ideal:  # no candidate, or best isn't ideal
             continue
         driver_id, car_id, car_label, _dist, _note = ranked[0]
         if claim(meta.order_id, driver_id, car_id, car_label):

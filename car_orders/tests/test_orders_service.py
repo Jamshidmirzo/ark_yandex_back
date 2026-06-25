@@ -107,6 +107,28 @@ def test_complete_sets_shift_online(env):
 
 
 @pytest.mark.django_db
+def test_complete_clears_overlay_pin_so_driver_is_free(env):
+    """A native /complete/ must drive any backing overlay OrderMeta terminal too —
+    otherwise the leftover non-terminal claim pins the now-free driver as «busy» in
+    the auto-dispatch guards (the «подходит, но новый заказ не назначается» bug)."""
+    from car_orders import dispatch
+    from car_orders.models import OrderMeta
+
+    _on_shift(env)
+    order = _order(env, S.IN_PROGRESS, driver=env["driver"], car=env["car"])
+    OrderMeta.objects.create(
+        order_id=order.pk, driver_id=env["driver"].id, overlay_claimed=True,
+        trip_state=OrderMeta.TripState.IN_TRIP, origin_lat=41.31, origin_lng=69.24,
+        address_lat=41.35, address_lng=69.29,
+    )
+    orders.complete(order.pk, env["driver"])
+    meta = OrderMeta.objects.get(order_id=order.pk)
+    assert meta.trip_state == OrderMeta.TripState.COMPLETED
+    # The driver no longer counts as loaded → auto-dispatch sees them free.
+    assert env["driver"].id not in dispatch.active_count_by_driver()
+
+
+@pytest.mark.django_db
 def test_cancel_rejects_unauthorized_user(env):
     order = _order(env, S.SCHEDULED, driver=env["driver"], car=env["car"])
     stranger = User.objects.create_user(username="x", password="pw")  # not author, no perms

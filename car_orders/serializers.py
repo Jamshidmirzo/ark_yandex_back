@@ -191,6 +191,10 @@ class CarOrderSerializer(serializers.ModelSerializer):
     planned_end = serializers.DateTimeField(read_only=True)
     is_delayed = serializers.SerializerMethodField()
     needs_reassign = serializers.SerializerMethodField()
+    # The demo status reconciled with our overlay trip — the SINGLE source of
+    # truth clients should display (so they stop re-deriving it). See
+    # services/status.py. The raw `status` stays for native workflow gating.
+    effective_status = serializers.SerializerMethodField()
 
     class Meta:
         model = CarOrder
@@ -213,6 +217,7 @@ class CarOrderSerializer(serializers.ModelSerializer):
             "driver",
             "car",
             "status",
+            "effective_status",
             "started_at",
             "finished_at",
             "created_by",
@@ -240,6 +245,21 @@ class CarOrderSerializer(serializers.ModelSerializer):
         if obj.status != CarOrder.Status.SCHEDULED:
             return False
         return scheduling.needs_reassign(obj, timezone.now())
+
+    def get_effective_status(self, obj) -> str:
+        from car_orders.models import OrderMeta
+        from car_orders.services.status import effective_status
+
+        # `metas_by_order_id` is provided by the viewset for LISTS (one query for
+        # the page — see CarOrderViewSet.get_serializer_context). For a single
+        # object (retrieve / me-active / schedule) fall back to one lookup.
+        metas = self.context.get("metas_by_order_id")
+        meta = (
+            metas.get(obj.pk)
+            if metas is not None
+            else OrderMeta.objects.filter(order_id=obj.pk).first()
+        )
+        return effective_status(obj.status, meta)
 
     def get_driver_location(self, obj):
         """Р3: live driver position, visible while the trip is in progress."""
@@ -325,6 +345,12 @@ class OrderMetaSerializer(serializers.ModelSerializer):
     # departed and the planned pickup time has already passed.
     at_risk = serializers.SerializerMethodField()
     is_late = serializers.SerializerMethodField()
+    # Timers (computed). The raw `search_started_at` / `arrived_at` go out too so the
+    # clients tick a skew-free clock locally; `*_elapsed_s` are server-now snapshots.
+    search_elapsed_s = serializers.SerializerMethodField()
+    wait_elapsed_s = serializers.SerializerMethodField()
+    wait_limit_s = serializers.SerializerMethodField()
+    wait_overdue = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderMeta
@@ -346,6 +372,12 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "origin_lng",
             "address_lat",
             "address_lng",
+            "origin_address",
+            "dest_address",
+            "project_name",
+            "note",
+            "car_type_name",
+            "created_by_name",
             "has_return",
             "return_lat",
             "return_lng",
@@ -358,6 +390,12 @@ class OrderMetaSerializer(serializers.ModelSerializer):
             "planned_end",
             "at_risk",
             "is_late",
+            "search_started_at",
+            "arrived_at",
+            "search_elapsed_s",
+            "wait_elapsed_s",
+            "wait_limit_s",
+            "wait_overdue",
         ]
         # `returning` is driven by the trip-state transition (not the form), so it's
         # read-only here — only TripStateView flips it on the return leg.
@@ -369,6 +407,14 @@ class OrderMetaSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "order_id", "returning", "trip_state", "planned_end", "at_risk", "is_late",
             "excluded_driver_ids",
+            # Timer timestamps are server-owned — set by approve / trip-state / requeue,
+            # never via a plain meta upsert (same reasoning as trip_state above).
+            "search_started_at", "arrived_at", "search_elapsed_s", "wait_elapsed_s",
+            "wait_limit_s", "wait_overdue",
+            # Descriptive snapshot is server-owned (filled from the demo body), never
+            # set via a client meta upsert — so a client can't spoof another order's
+            # project/note/etc.
+            "project_name", "note", "car_type_name", "created_by_name",
         ]
         # `driver_name` / `driver_phone` are the driver's own display snapshot, captured
         # at claim by the claiming driver's client (both claim paths: overlay-claim AND
@@ -400,6 +446,36 @@ class OrderMetaSerializer(serializers.ModelSerializer):
         ):
             return timezone.now() > obj.planned_datetime
         return False
+
+    @staticmethod
+    def _wait_limit_s() -> int:
+        from django.conf import settings
+
+        return int(getattr(settings, "CAR_ORDER_PICKUP_WAIT_LIMIT_S", 30 * 60))
+
+    def get_search_elapsed_s(self, obj) -> int | None:
+        # «Поиск водителя» counts up only while still searching (no driver yet); once
+        # a driver is assigned the timer disappears.
+        if obj.search_started_at is None or obj.driver_id is not None:
+            return None
+        from django.utils import timezone
+
+        return max(0, int((timezone.now() - obj.search_started_at).total_seconds()))
+
+    def get_wait_elapsed_s(self, obj) -> int | None:
+        # «Ожидание клиента» counts up only while the driver is at the pickup.
+        if obj.arrived_at is None or obj.trip_state != OrderMeta.TripState.AT_CLIENT:
+            return None
+        from django.utils import timezone
+
+        return max(0, int((timezone.now() - obj.arrived_at).total_seconds()))
+
+    def get_wait_limit_s(self, obj) -> int:
+        return self._wait_limit_s()
+
+    def get_wait_overdue(self, obj) -> bool:
+        elapsed = self.get_wait_elapsed_s(obj)
+        return elapsed is not None and elapsed >= self._wait_limit_s()
 
 
 class CarOrderTemplateSerializer(serializers.ModelSerializer):

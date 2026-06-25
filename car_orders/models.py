@@ -493,6 +493,21 @@ class OrderMeta(TimestampMixin):
     origin_lng = models.FloatField(null=True, blank=True)
     address_lat = models.FloatField(null=True, blank=True)
     address_lng = models.FloatField(null=True, blank=True)
+    # Human-readable «откуда / куда» snapshotted onto the overlay so EVERY client (and
+    # an overlay-only order with no local/demo CarOrder body — e.g. an app-created one)
+    # can show the route as text, not just coords. Filled server-side (reverse-geocode)
+    # by the dispatch worker; the destination can also carry the demo order's own label.
+    origin_address = models.CharField(max_length=500, blank=True, verbose_name=_("Origin address"))
+    dest_address = models.CharField(max_length=500, blank=True, verbose_name=_("Destination address"))
+    # Demo-only DESCRIPTIVE fields snapshotted onto the overlay (like the driver
+    # snapshot above) so an order whose demo body the requester can't read (the
+    # detail proxy 404s — see CarOrderViewSet.get_queryset / car_order_proxy) still
+    # shows full info via the client's overlay fallback. Filled server-side, lazily,
+    # whenever a privileged client fetches the demo bodies (see _snapshot_descriptive).
+    project_name = models.CharField(max_length=500, blank=True, verbose_name=_("Project name"))
+    note = models.TextField(blank=True, verbose_name=_("Note / purpose"))
+    car_type_name = models.CharField(max_length=255, blank=True, verbose_name=_("Car type name"))
+    created_by_name = models.CharField(max_length=255, blank=True, verbose_name=_("Created by"))
     # «Туда-обратно» as ONE order: after dropping at the destination the driver
     # waits on site (shoot), then drives a RETURN leg to `return_*` (defaults to
     # the pickup if not set). No return time — the shoot end is unknown, so the
@@ -512,6 +527,15 @@ class OrderMeta(TimestampMixin):
     )
     planned_datetime = models.DateTimeField(null=True, blank=True)
     latest_start = models.DateTimeField(null=True, blank=True)
+    # «Поиск водителя» timer: stamped when the order enters the dispatch queue
+    # (dispatchable + driverless) and reset when it re-enters on requeue/reassign.
+    # The search clock runs only while driver_id is None (the serializer reports
+    # elapsed only then), so a separate "search ended" field isn't needed.
+    search_started_at = models.DateTimeField(null=True, blank=True)
+    # «Ожидание клиента на подаче» timer: stamped on the FIRST transition to
+    # at_client (driver arrived, waiting for the client) and cleared when the
+    # claim is torn down / re-claimed so a re-driven order starts a fresh wait.
+    arrived_at = models.DateTimeField(null=True, blank=True)
     trip_state = models.CharField(
         max_length=20, choices=TripState.choices, default=TripState.ASSIGNED
     )

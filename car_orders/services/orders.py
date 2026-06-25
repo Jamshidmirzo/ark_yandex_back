@@ -118,24 +118,69 @@ def start(order_id, driver):
 
 def complete(order_id, driver):
     """Assigned driver finishes the in-progress trip → ``completed``."""
-    order = _get(order_id)
-    if order.driver_id != driver.id:
-        raise OrderError(
-            "PERMISSION_DENIED",
-            _("Only the assigned driver can complete this trip."),
-            http_status=403,
-        )
-    if order.status != CarOrder.Status.IN_PROGRESS:
-        raise OrderError("INVALID_STATUS", _("Only an in-progress trip can be completed."))
-    order.status = CarOrder.Status.COMPLETED
-    order.finished_at = timezone.now()
-    order.save(update_fields=["status", "finished_at", "updated_at"])
-    active = shift.active_shift(driver)
-    if active:
-        active.status = DriverShift.Status.ONLINE
-        active.save(update_fields=["status", "updated_at"])
-    audit.record_completed(order, driver)
+    # All-or-nothing: the native completion, the shift release AND the overlay reconcile
+    # commit together. Otherwise a crash between marking the CarOrder completed and
+    # flipping the overlay would leave the order «done» yet still pinning the driver as
+    # busy in the auto-dispatch guards — the exact bug this reconcile exists to prevent.
+    from car_orders import concurrency
+
+    with transaction.atomic():
+        # Take the per-driver advisory lock FIRST — same as trip_state.advance() — so the
+        # two completion paths (native /complete/ here, overlay trip_state=completed there)
+        # serialise on the driver instead of grabbing the CarOrder and OrderMeta row locks
+        # in opposite orders, which would deadlock on Postgres when both fire for one order.
+        concurrency.lock_driver(driver.id)
+        order = CarOrder.objects.select_for_update().filter(pk=order_id).first()
+        if order is None:
+            raise OrderError("NOT_FOUND", _("Order not found."))
+        if order.driver_id != driver.id:
+            raise OrderError(
+                "PERMISSION_DENIED",
+                _("Only the assigned driver can complete this trip."),
+                http_status=403,
+            )
+        if order.status != CarOrder.Status.IN_PROGRESS:
+            raise OrderError("INVALID_STATUS", _("Only an in-progress trip can be completed."))
+        order.status = CarOrder.Status.COMPLETED
+        order.finished_at = timezone.now()
+        order.save(update_fields=["status", "finished_at", "updated_at"])
+        active = shift.active_shift(driver)
+        if active:
+            active.status = DriverShift.Status.ONLINE
+            active.save(update_fields=["status", "updated_at"])
+        _reconcile_overlay_completion(order.pk)
+        audit.record_completed(order, driver)
     return order
+
+
+def _reconcile_overlay_completion(order_id) -> None:
+    """Mirror a native ``/complete/`` onto our overlay ``OrderMeta`` so a finished
+    trip doesn't leave a non-terminal claim pinning the driver as «busy».
+
+    The native completion path only touches the demo ``CarOrder`` — the inverse of
+    ``trip_state._reconcile_native_completion`` (which mirrors an overlay-completed
+    trip onto the native order). Without this, an order that has BOTH a native row
+    and an overlay ``OrderMeta`` (e.g. an approved/dispatchable order a driver claimed
+    natively) keeps ``trip_state`` non-terminal after `/complete/`, so the auto-dispatch
+    busy-guard (``dispatch.claim``) and load count (``active_count_by_driver``) treat the
+    now-free driver as still occupied.
+
+    We only flip ``trip_state`` to COMPLETED (keeping driver_id / overlay_claimed) so a
+    natively-completed order leaves the SAME terminal overlay shape an overlay-completed
+    one does. That's enough to free the driver — both busy checks filter on
+    ``trip_state in TERMINAL``. Idempotent; no-op when there's no overlay row or it's
+    already terminal."""
+    from car_orders.models import OrderMeta
+
+    with transaction.atomic():
+        meta = OrderMeta.objects.select_for_update().filter(order_id=order_id).first()
+        if meta is None or meta.trip_state in (
+            OrderMeta.TripState.COMPLETED,
+            OrderMeta.TripState.CANCELLED,
+        ):
+            return
+        meta.trip_state = OrderMeta.TripState.COMPLETED
+        meta.save(update_fields=["trip_state"])
 
 
 def cancel(order_id, actor, reason=""):

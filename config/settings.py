@@ -263,6 +263,10 @@ CAR_ORDER_GEOCODE_CACHE_TTL = env.int("CAR_ORDER_GEOCODE_CACHE_TTL", default=24 
 CAR_ORDER_ARRIVAL_GEOFENCE_M = env.int("CAR_ORDER_ARRIVAL_GEOFENCE_M", default=100)
 # A GPS fix older than this (seconds) is too stale to confirm arrival.
 CAR_ORDER_GPS_FRESH_S = env.int("CAR_ORDER_GPS_FRESH_S", default=120)
+# Pickup-wait limit (seconds): once the driver has waited at the client this long
+# (trip_state=at_client), the order is flagged `wait_overdue` and the clients surface
+# a manual «Клиент не вышел — отменить» action. No auto-cancel — a human decides.
+CAR_ORDER_PICKUP_WAIT_LIMIT_S = env.int("CAR_ORDER_PICKUP_WAIT_LIMIT_S", default=30 * 60)
 
 
 # Backend auto-dispatch worker (`manage.py auto_dispatch`). Assigns awaiting orders
@@ -274,6 +278,11 @@ AUTO_DISPATCH_LEAD_MIN = env.int("AUTO_DISPATCH_LEAD_MIN", default=45)
 AUTO_DISPATCH_STALE_SEC = env.int("AUTO_DISPATCH_STALE_SEC", default=180)
 # Ignore driver GPS fixes older than this when ranking by distance.
 AUTO_DISPATCH_POS_MAX_AGE = env.int("AUTO_DISPATCH_POS_MAX_AGE", default=180)
+# Auto-reap abandoned pins: free a driver stuck on an ASSIGNED order they never started
+# and have gone dark on (no GPS this long → app closed / shift left), requeuing it for
+# someone online. 0 disables. Generous so an online driver (who heartbeats even while
+# parked) is never reaped — only a truly-gone one. Lower it (e.g. 300) for fast tests.
+CAR_ORDER_ABANDON_SEC = env.int("CAR_ORDER_ABANDON_SEC", default=60 * 60)
 
 # Driver GPS simulator (`manage.py auto_simulate`). OFF by default now that real
 # phones stream their position to /drivers/me/location/ — the fake feed would fight

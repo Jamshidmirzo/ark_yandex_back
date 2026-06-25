@@ -35,6 +35,52 @@ def test_overlay_claim_driver_busy_is_400():
 
 
 @pytest.mark.django_db
+def test_dispatcher_assign_snapshots_driver_from_hr(monkeypatch):
+    # A dispatcher manual assign sends NO driver_name/phone (it doesn't hold the chosen
+    # driver's HR record), so the view fills the snapshot server-side from upstream HR —
+    # else the assigned order shows a blank driver on the live-track / detail card.
+    import car_orders.views as views
+
+    monkeypatch.setattr(
+        views, "_driver_snapshot", lambda request, driver_id: ("Иван Водитель", "+998901234567")
+    )
+    OrderMeta.objects.create(order_id=905)
+    r = APIClient().post(
+        "/api/v1/car-orders/905/overlay-claim/", {"driver_id": 7, "car_id": 1}, format="json"
+    )
+    assert r.status_code == 200
+    meta = OrderMeta.objects.get(order_id=905)
+    assert meta.driver_name == "Иван Водитель"
+    assert meta.driver_phone == "+998901234567"
+
+
+@pytest.mark.django_db
+def test_self_claim_snapshot_is_not_overwritten_by_hr_fetch(monkeypatch):
+    # A driver self-claim already carries its own name/phone, so the view must NOT hit
+    # the HR fetch — the client-supplied snapshot wins (and we save a round-trip).
+    import car_orders.views as views
+
+    called = {"hit": False}
+
+    def _boom(request, driver_id):
+        called["hit"] = True
+        return ("Should", "NotWin")
+
+    monkeypatch.setattr(views, "_driver_snapshot", _boom)
+    OrderMeta.objects.create(order_id=906)
+    r = APIClient().post(
+        "/api/v1/car-orders/906/overlay-claim/",
+        {"driver_id": 8, "car_id": 1, "driver_name": "Сам Себя", "driver_phone": "+99890"},
+        format="json",
+    )
+    assert r.status_code == 200
+    meta = OrderMeta.objects.get(order_id=906)
+    assert meta.driver_name == "Сам Себя"
+    assert meta.driver_phone == "+99890"
+    assert called["hit"] is False
+
+
+@pytest.mark.django_db
 def test_overlay_extend_validation_is_400():
     OrderMeta.objects.create(order_id=903, estimated_duration=60)
     r = APIClient().post("/api/v1/car-orders/903/extend/", {"minutes": 0}, format="json")

@@ -8,6 +8,7 @@ joined with its latest live position + the computed risk flags — what the
 from car_orders import scheduling
 from car_orders.models import OrderLiveLocation, OrderMeta
 from car_orders.serializers import OrderMetaSerializer
+from car_orders.services.status import effective_status, status_map_for
 
 TERMINAL = (OrderMeta.TripState.COMPLETED, OrderMeta.TripState.CANCELLED)
 
@@ -42,7 +43,7 @@ def _planned_geometry(meta):
     return downsample(geom) if geom else None
 
 
-def fleet_live_orders():
+def fleet_live_orders(request=None):
     # Every non-terminal overlay order, INCLUDING ones still awaiting a driver
     # (driver_id is None) — the dispatcher needs to see those to assign them.
     metas = list(OrderMeta.objects.exclude(trip_state__in=TERMINAL))
@@ -57,10 +58,26 @@ def fleet_live_orders():
         loc.order_id: loc
         for loc in OrderLiveLocation.objects.filter(order_id__in=[m.order_id for m in metas])
     }
+    # The reconciled status, batched once for the whole snapshot — so the dispatcher
+    # reads the SAME effective_status the order list/detail/mobile already show
+    # (otherwise the board re-derived status from trip_state alone and drifted).
+    # Orders live upstream (no local CarOrder mirror), so backfill their demo status
+    # from the upstream bodies when we have the caller's request — the request-less WS
+    # refresh keeps the local-only behaviour (it streams position/trip_state, and the
+    # 6 s HTTP refetch carries the reconciled status).
+    order_ids = [m.order_id for m in metas]
+    status_map = status_map_for(order_ids)
+    if request is not None:
+        from car_orders.views import _fill_demo_statuses
+
+        _fill_demo_statuses(status_map, order_ids, request)
     out = []
     for m in metas:
         # coords, window, trip_state, at_risk, is_late, car_label, driver_id …
         data = OrderMetaSerializer(m, context=ctx).data
+        raw = status_map.get(m.order_id)
+        data["status"] = raw
+        data["effective_status"] = effective_status(raw, m)
         loc = locs.get(m.order_id)
         data["lat"] = loc.lat if loc else None
         data["lng"] = loc.lng if loc else None

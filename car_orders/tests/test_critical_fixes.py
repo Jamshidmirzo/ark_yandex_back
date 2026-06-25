@@ -3,6 +3,7 @@ shift hardening, and the authoritative TripStateView (transitions + geofence).
 Bypass the demo-login fixture — hit the local overlay endpoints directly."""
 
 import pytest
+from django.http import HttpResponse
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -14,6 +15,53 @@ TS = OrderMeta.TripState
 
 def _c():
     return APIClient()
+
+
+# ---- me/active-order keeps the client's CarOrderModel shape -------------------
+
+@pytest.mark.django_db
+def test_active_order_fallback_matches_client_model_shape(monkeypatch):
+    # A manual assign keeps the demo order at driver=null, so the assignee often can't
+    # read it via the single GET; with the list cache also empty the view must STILL
+    # return a CarOrderModel-shaped object (id, status, coords) — not the raw overlay
+    # (order_id / no id / no status), which left the mobile card blank.
+    import config.gateway as gw
+    import car_orders.views as views
+
+    views._DEMO_ORDERS_CACHE.clear()  # don't read a body cached by another test
+    monkeypatch.setattr(gw, "gateway", lambda request, path: HttpResponse(b"", status=404))
+    OrderMeta.objects.create(
+        order_id=480, driver_id=9, overlay_claimed=True, trip_state=TS.ASSIGNED,
+        origin_lat=41.1, origin_lng=69.2, address_lat=41.2, address_lng=69.3,
+    )
+    r = _c().get("/api/v1/car-orders/me/active-order/?driver_id=9")
+    assert r.status_code == 200, r.content
+    body = r.data
+    assert body["id"] == 480                      # `id`, not `order_id` → model parses it
+    assert body["effective_status"] == "in_progress"   # claimed → active, status pill shows
+    assert body["address_lat"] == 41.2 and body["origin_lat"] == 41.1  # route still drawable
+    assert body["overlay"]["driver_id"] == 9
+
+
+@pytest.mark.django_db
+def test_active_order_enriches_demo_body_when_readable(monkeypatch):
+    # When the demo body IS readable it's returned verbatim + our overlay reconciliation
+    # (driver/trip_state/effective_status), so the card shows the real address/title.
+    import config.gateway as gw
+
+    monkeypatch.setattr(
+        gw, "gateway",
+        lambda request, path: HttpResponse(
+            '{"id": 481, "address": "Сквер", "status": "awaiting_driver"}'.encode(),
+            status=200, content_type="application/json",
+        ),
+    )
+    OrderMeta.objects.create(order_id=481, driver_id=9, overlay_claimed=True, trip_state=TS.ASSIGNED)
+    r = _c().get("/api/v1/car-orders/me/active-order/?driver_id=9")
+    assert r.status_code == 200, r.content
+    assert r.data["address"] == "Сквер"
+    assert r.data["effective_status"] == "in_progress"  # reconciled from the overlay claim
+    assert r.data["driver_id"] == 9
 
 
 # ---- Fix 3: reassign / release put the order BACK in the queue ----------------

@@ -15,6 +15,7 @@ from car_orders.views import (
     ClaimCheckBatchView,
     ClaimCheckView,
     admin_approve_overlay,
+    car_order_proxy,
     reject_overlay,
     DriverLocationView,
     DriverPositionsView,
@@ -28,6 +29,7 @@ from car_orders.views import (
     MetaBatchView,
     MyActiveOrderView,
     MyOverlayOrdersView,
+    NoShowView,
     OrderMetaView,
     OverlayClaimView,
     OverlayReleaseView,
@@ -126,6 +128,13 @@ urlpatterns = [
         OverlayReleaseView.as_view(),
         name="car-order-overlay-release",
     ),
+    # «Клиент не вышел» — cancel an at_client order whose client never showed.
+    # Before the gateway catch-all so demo never sees it.
+    path(
+        "api/v1/car-orders/<int:pk>/no-show/",
+        NoShowView.as_view(),
+        name="car-order-no-show",
+    ),
     path(
         "api/v1/car-orders/<int:pk>/trip-state/",
         TripStateView.as_view(),
@@ -151,6 +160,11 @@ urlpatterns = [
         reject_overlay,
         name="car-order-reject",
     ),
+    # Proxy the demo car-order LIST + DETAIL but inject our reconciled effective_status
+    # (single source of truth). Must sit AFTER the specific /car-orders/<pk>/<action>/
+    # routes above (longer paths win) and BEFORE the catch-all. Non-GET passes through.
+    path("api/v1/car-orders/", car_order_proxy, name="car-order-list-proxy"),
+    path("api/v1/car-orders/<int:pk>/", car_order_proxy, name="car-order-detail-proxy"),
     # Transparent gateway → real DEV backend (demo.ark.glob.uz). Keep last.
     re_path(r"^api/v1/(?P<path>.*)$", gateway, name="gateway"),
 ]

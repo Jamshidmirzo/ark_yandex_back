@@ -37,8 +37,11 @@ def record_rejected(order, actor, reason=""):
     return _log(order, actor, CarOrderActivity.Kind.REJECTED, reason=reason)
 
 
-def record_cancelled(order, actor, reason=""):
-    return _log(order, actor, CarOrderActivity.Kind.CANCELLED, reason=reason)
+def record_cancelled(order, actor, reason="", **extra):
+    # `extra` carries optional context (e.g. waited_s for a «клиент не вышел» cancel);
+    # drop None values so the payload stays clean.
+    payload = {k: v for k, v in extra.items() if v is not None}
+    return _log(order, actor, CarOrderActivity.Kind.CANCELLED, reason=reason, **payload)
 
 
 def record_released(order, actor, reason=""):

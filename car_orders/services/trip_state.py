@@ -194,6 +194,12 @@ def advance(order_id, new_state, *, actor_driver_id=None, is_dispatcher=False):
         defaults = validate(
             meta, new_state, actor_driver_id=actor_driver_id, is_dispatcher=is_dispatcher
         )
+        # «Ожидание клиента» timer starts here: stamp the FIRST arrival at the pickup
+        # so every surface counts the wait from the same instant. A same-state re-tap
+        # won't overwrite it (meta.arrived_at is already set). Done in advance (not
+        # validate) so validate stays a pure rule-check returning only the trip_state.
+        if new_state == _TS.AT_CLIENT and meta.arrived_at is None:
+            defaults["arrived_at"] = timezone.now()
         meta, _created = OrderMeta.objects.update_or_create(order_id=order_id, defaults=defaults)
         # The mobile client drives the whole trip through trip_state and never calls
         # the native /start/ or /complete/ endpoints, so the demo CarOrder.status
@@ -253,7 +259,12 @@ def _fire_side_effects(meta, new_state) -> None:
 
     if new_state in TERMINAL:
         OrderLiveLocation.objects.filter(order_id=meta.order_id).delete()
-    events.broadcast_location(meta.order_id, {"trip_state": new_state, "returning": meta.returning})
+    payload = {"trip_state": new_state, "returning": meta.returning}
+    # Push the arrival instant so live watchers (customer / dispatcher) start the
+    # «ожидание клиента» clock immediately, without waiting for the next poll.
+    if new_state == _TS.AT_CLIENT and meta.arrived_at is not None:
+        payload["arrived_at"] = meta.arrived_at.isoformat()
+    events.broadcast_location(meta.order_id, payload)
     events.notify_order_status(meta, new_state)  # toast to driver + requester
     # Server owns the route: push the geometry for the NEW leg (approach to pickup /
     # pickup→destination / return), so the map always shows where to go.

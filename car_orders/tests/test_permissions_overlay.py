@@ -63,6 +63,7 @@ CASES = [
     # test_views_errors.test_trip_state_permission_denied_is_403.)
     ("overlay_claim", "POST", "/api/v1/car-orders/500/overlay-claim/", {"car_id": 7}, DOD),
     ("overlay_release", "POST", "/api/v1/car-orders/500/overlay-release/", {}, DOD),
+    ("no_show", "POST", "/api/v1/car-orders/500/no-show/", {}, DOD),
     ("extend", "POST", "/api/v1/car-orders/500/extend/", {"minutes": 15}, DOD),
     ("driver_location", "POST", "/api/v1/car-orders/drivers/me/location/",
      {"lat": 41.3, "lng": 69.2}, DOD),
