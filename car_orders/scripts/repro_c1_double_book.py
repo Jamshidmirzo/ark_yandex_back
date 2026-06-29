@@ -8,7 +8,7 @@ overlay.claim / dispatch.claim блокируют (select_for_update) ТОЛЬК
 ⚠️  Требуется Postgres (на SQLite select_for_update — no-op, см. C2, и потоки
     блокируют файл БД). Запуск:
 
-    DATABASE_URL=postgres://user:pass@localhost:5432/arkdb \
+    POSTGRES_HOST=localhost POSTGRES_DB=ark_yandex POSTGRES_USER=ark POSTGRES_PASSWORD=ark \
         .venv/bin/python car_orders/scripts/repro_c1_double_book.py
 
 Скрипт создаёт две временные OrderMeta (order_id 990001/990002), гоняет гонку и
@@ -73,7 +73,7 @@ def _attempt():
 def main():
     if connection.vendor != "postgresql":
         print(f"⚠️  Текущая БД — {connection.vendor}. Гонка C1 видна только на Postgres.")
-        print("    Задайте DATABASE_URL=postgres://… и повторите.")
+        print("    Задайте POSTGRES_HOST/POSTGRES_DB/… (см. .env.example) и повторите.")
         return 2
 
     print(f"Гоняю гонку (водитель {DRIVER}, заказы {OIDS}). До 30 попыток…")

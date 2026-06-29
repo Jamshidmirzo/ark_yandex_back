@@ -3,50 +3,108 @@
 services:
   # Shared channel layer for WebSockets — lets the auto-dispatch WORKER (a separate
   # process) push assignment/route updates that reach the web's WS consumers. With
-  # the in-memory layer those group_sends would never cross process boundaries.
+  # the in-memory layer those group_sends would never cross process boundaries (and
+  # gunicorn runs >1 UvicornWorker, so a shared layer is mandatory).
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+
+  # Primary DB (plain Postgres — identical to upstream ark-backend). Holds everything
+  # except the two telemetry models.
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ark
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # Gate the backend's entrypoint migrate on the DB actually accepting connections
+    # (depends_on alone only waits for container start, not readiness).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ark -d ark_yandex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Telemetry DB (PostGIS) — holds ONLY DriverPosition + OrderLiveLocation, routed
+  # there by car_orders.routers.GeoRouter. The postgis image auto-creates the
+  # extension, and migration 0026 (CreateExtension) makes it explicit/idempotent.
+  geodb:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ark_geo
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ark
+    volumes:
+      - geo_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ark -d ark_geo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   backend:
     build:
       context: .
     image: ark-yandex-backend
     environment:
-      # Persisted SQLite on a named volume (survives restarts).
-      DATABASE_URL: sqlite:////data/db.sqlite3
+      # Primary + geo DB (POSTGRES_* style, matching ark-backend). GEO_POSTGRES_USER/
+      # PASSWORD fall back to POSTGRES_* in settings, so only DB+HOST differ.
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ark
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      GEO_POSTGRES_DB: ark_geo
+      GEO_POSTGRES_HOST: geodb
       # CORS for the dockerized frontend (served at :5173) + native vite dev.
       CORS_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       # Real backend (DEV/demo) — ALL /api/v1/* is reverse-proxied here
       # (real accounts, drivers, car orders). Change to repoint the whole app.
       UPSTREAM_API_BASE: https://demo.ark.glob.uz/ru/api/v1
-      # Durable, cross-process WS channel layer (channels_redis). Served via daphne
-      # (ASGI) — see docker-entrypoint.sh.
-      REDIS_URL: redis://redis:6379/0
+      # Durable, cross-process WS channel layer (channels_redis).
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
       - "8000:8000"
-    volumes:
-      - backend_data:/data
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      geodb:
+        condition: service_healthy
 
-  # Server-side auto-dispatch worker. Reuses the backend image, shares its DB
-  # volume, and runs the «nearest free driver» assignment loop so auto-dispatch
-  # works with no dispatcher tab open. Gated live by the dispatcher's in-app
-  # switch (DispatchSettings) AND the AUTO_DISPATCH_ENABLED env kill-switch.
-  # Shares REDIS_URL so its WS pushes reach the web process.
+  # Server-side auto-dispatch worker. Reuses the backend image and shares the same
+  # Postgres + redis (its WS group_sends reach the web process). Connects to the DBs
+  # over the network — no shared volume. Overrides the entrypoint, so it does NOT run
+  # migrations (the backend container migrates both DBs first).
   dispatcher:
     image: ark-yandex-backend
     command: ["python", "manage.py", "auto_dispatch"]
     environment:
-      DATABASE_URL: sqlite:////data/db.sqlite3
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ark
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      GEO_POSTGRES_DB: ark_geo
+      GEO_POSTGRES_HOST: geodb
       AUTO_DISPATCH_ENABLED: "true"
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - backend_data:/data
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     depends_on:
-      - backend
-      - redis
+      backend:
+        condition: service_started
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      geodb:
+        condition: service_healthy
 
   frontend:
     build:
@@ -61,4 +119,5 @@ services:
       - backend
 
 volumes:
-  backend_data:
+  db_data:
+  geo_data:

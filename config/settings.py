@@ -2,7 +2,8 @@
 Django settings for config project.
 
 Configuration is read from environment variables (see .env.example) using
-django-environ, so the same settings module works in dev and production.
+python-decouple (config(), Csv) — the same library and conventions as ark-backend,
+so the same settings module works in dev and production.
 
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
@@ -10,30 +11,22 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from datetime import timedelta
 from pathlib import Path
 
-import environ
+from decouple import Csv, config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-env = environ.Env(
-    DEBUG=(bool, False),
-    ALLOWED_HOSTS=(list, ["127.0.0.1", "localhost"]),
-)
-
-# Read .env file if present (not committed; see .env.example).
-environ.Env.read_env(BASE_DIR / ".env")
-
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env(
+SECRET_KEY = config(
     "SECRET_KEY",
     default="django-insecure-0w1=j2ke@=0@f52wsee@$#k2z!-e$w43-3m9dipz$s0)mb#5h!",
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env("DEBUG")
+DEBUG = config("DEBUG", default=False, cast=bool)
 
-ALLOWED_HOSTS = env("ALLOWED_HOSTS")
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="127.0.0.1,localhost", cast=Csv())
 
 
 # Application definition
@@ -47,6 +40,10 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # GeoDjango — PostGIS-backed nearest-driver search (the `geo` DB only). This is a
+    # deliberate divergence from ark-backend (which has no PostGIS); kept isolated and
+    # revertible — see car_orders/routers.py and the geo migrations.
+    "django.contrib.gis",
     # Third party
     "channels",
     "rest_framework",
@@ -97,46 +94,53 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 # Channels / WebSockets (live driver tracking, fleet dashboard, notifications).
 # In-memory is fine for the single-process dev server, but it loses all groups on
-# restart and can't span workers. Set REDIS_URL in prod (needs
-# `pip install channels_redis`) for a durable, multi-process layer — required once
-# the dispatcher fleet view and per-user notifications run for real.
+# restart and can't span workers. Set REDIS_HOST in prod (needs
+# `pip install channels_redis`) for a durable, multi-process layer — REQUIRED once
+# gunicorn runs >1 UvicornWorker (group_sends must cross processes).
 ASGI_APPLICATION = "config.asgi.application"
-REDIS_URL = env("REDIS_URL", default="")
-if REDIS_URL:
+REDIS_HOST = config("REDIS_HOST", default="")
+REDIS_PORT = config("REDIS_PORT", default=6379, cast=int)
+if REDIS_HOST:
     CHANNEL_LAYERS = {
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
-            "CONFIG": {"hosts": [REDIS_URL]},
+            "CONFIG": {"hosts": [(REDIS_HOST, REDIS_PORT)]},
         }
     }
 else:
     CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 
 
-# Database
-# Defaults to SQLite; set DATABASE_URL to use Postgres, e.g.
-# postgres://user:pass@localhost:5432/dbname
+# Database — PostgreSQL, addressed by the individual POSTGRES_* env vars (same shape
+# as ark-backend). The optional second `geo` database is a PostGIS store that holds
+# ONLY the high-write, FK-free telemetry models (DriverPosition, OrderLiveLocation),
+# routed there by car_orders.routers.GeoRouter. `default` stays PLAIN Postgres so it
+# remains identical to upstream (the geo split is a contained, revertible divergence).
 DATABASES = {
-    "default": env.db_url(
-        "DATABASE_URL",
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-    ),
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": config("POSTGRES_DB", default="ark_yandex"),
+        "USER": config("POSTGRES_USER", default="postgres"),
+        "PASSWORD": config("POSTGRES_PASSWORD", default="postgres"),
+        "HOST": config("POSTGRES_HOST", default="db"),
+        "PORT": config("POSTGRES_PORT", default="5432"),
+    },
+    "geo": {
+        "ENGINE": "django.contrib.gis.db.backends.postgis",
+        "NAME": config("GEO_POSTGRES_DB", default="ark_geo"),
+        "USER": config("GEO_POSTGRES_USER", default=config("POSTGRES_USER", default="postgres")),
+        "PASSWORD": config(
+            "GEO_POSTGRES_PASSWORD",
+            default=config("POSTGRES_PASSWORD", default="postgres"),
+        ),
+        "HOST": config("GEO_POSTGRES_HOST", default=config("POSTGRES_HOST", default="db")),
+        "PORT": config("GEO_POSTGRES_PORT", default=config("POSTGRES_PORT", default="5432")),
+    },
 }
 
-# AUDIT C2: on SQLite, `SELECT ... FOR UPDATE` is a silent no-op, so the row locks
-# guarding the claim paths provide no protection under concurrency. That's fine for
-# dev/tests but unsafe in production — warn loudly so a prod deploy switches to
-# Postgres (DATABASE_URL=postgres://…).
-if not DEBUG and "sqlite" in DATABASES["default"].get("ENGINE", ""):
-    import warnings
-
-    warnings.warn(
-        "Running with SQLite while DEBUG=False: select_for_update() is a no-op, so the "
-        "car-orders claim concurrency guards are disabled. Use Postgres in production "
-        "(set DATABASE_URL). See car_orders/AUDIT.md finding C2.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
+# Route the two FK-free telemetry models to the `geo` PostGIS database; everything
+# else stays in `default`. See car_orders/routers.py.
+DATABASE_ROUTERS = ["car_orders.routers.GeoRouter"]
 
 
 # Password validation
@@ -192,7 +196,7 @@ REST_FRAMEWORK = {
 # Language-prefixed base, e.g. http://host.docker.internal:12001/ru/api/v1
 # (host.docker.internal lets the backend container reach the host's :12001),
 # or a deployed server URL. Override via the UPSTREAM_API_BASE env var.
-UPSTREAM_API_BASE = env(
+UPSTREAM_API_BASE = config(
     "UPSTREAM_API_BASE",
     default="http://host.docker.internal:12001/ru/api/v1",
 )
@@ -201,15 +205,15 @@ UPSTREAM_API_BASE = env(
 # so a dead/unreachable upstream fails fast (no 30s hang); read is generous so a
 # slow-but-alive endpoint isn't cut off. Override per-env if needed.
 UPSTREAM_TIMEOUT = (
-    env.float("UPSTREAM_CONNECT_TIMEOUT", default=5.0),
-    env.float("UPSTREAM_READ_TIMEOUT", default=120.0),
+    config("UPSTREAM_CONNECT_TIMEOUT", default=5.0, cast=float),
+    config("UPSTREAM_READ_TIMEOUT", default=120.0, cast=float),
 )
 
 # Overlay auth bridge. OFF (default) keeps the open dev behaviour; ON validates
 # the demo bearer token via demo /auth/me/ (config.auth.DemoTokenAuthentication)
 # and derives the driver from it instead of the request body. Flip on once login
 # is verified end-to-end. See car_orders.permissions.
-REQUIRE_OVERLAY_AUTH = env.bool("REQUIRE_OVERLAY_AUTH", default=False)
+REQUIRE_OVERLAY_AUTH = config("REQUIRE_OVERLAY_AUTH", default=False, cast=bool)
 
 # AUDIT H5: with overlay auth off, the overlay endpoints trust a body-supplied
 # driver_id and expose the whole order board to everyone. Fine for dev; a serious
@@ -229,76 +233,83 @@ if not DEBUG and not REQUIRE_OVERLAY_AUTH:
 # Car-order scheduling & routing.
 # Travel buffer reserved between two consecutive orders of one driver, so the
 # overlap check leaves room to drive from one job to the next.
-CAR_ORDER_TRAVEL_BUFFER = timedelta(minutes=env.int("CAR_ORDER_TRAVEL_BUFFER_MIN", default=30))
+CAR_ORDER_TRAVEL_BUFFER = timedelta(
+    minutes=config("CAR_ORDER_TRAVEL_BUFFER_MIN", default=30, cast=int)
+)
 # Default on-site service time the duration auto-estimate adds on top of travel.
-CAR_ORDER_DEFAULT_SERVICE = timedelta(minutes=env.int("CAR_ORDER_DEFAULT_SERVICE_MIN", default=30))
+CAR_ORDER_DEFAULT_SERVICE = timedelta(
+    minutes=config("CAR_ORDER_DEFAULT_SERVICE_MIN", default=30, cast=int)
+)
 # Routing engine used by POST /car-orders/estimate/ and the simulator. OSRM's
 # public demo server by default; point at a self-hosted OSRM or swap to the
 # Yandex Router API in production.
-CAR_ORDER_OSRM_URL = env("CAR_ORDER_OSRM_URL", default="https://router.project-osrm.org")
+CAR_ORDER_OSRM_URL = config("CAR_ORDER_OSRM_URL", default="https://router.project-osrm.org")
 # How long (seconds) a successful OSRM route is memoised in-process. Longer = fewer
 # hits on the rate-limited public demo (so fewer straight-line fallbacks), at the cost
 # of staleness; live legs re-key on the driver's moving position so they're unaffected.
 # 0 disables caching. Bumped from the old 60 s while we're still on the public demo.
-CAR_ORDER_ROUTE_CACHE_TTL = env.int("CAR_ORDER_ROUTE_CACHE_TTL", default=180)
+CAR_ORDER_ROUTE_CACHE_TTL = config("CAR_ORDER_ROUTE_CACHE_TTL", default=180, cast=int)
 # Half-range (deg) for the OSRM `bearings` start-snap constraint on a live driver leg
 # (see routing._osrm_params). 90° rejects the oncoming carriageway without being so
 # tight it provokes a «no route» → straight-line fallback.
-CAR_ORDER_OSRM_BEARING_RANGE = env.int("CAR_ORDER_OSRM_BEARING_RANGE", default=90)
+CAR_ORDER_OSRM_BEARING_RANGE = config("CAR_ORDER_OSRM_BEARING_RANGE", default=90, cast=int)
 
 # Server-side geocoding proxy (GET /car-orders/geocode/) — the order form's address
 # search/reverse. Proxied here so the browser never hits OSM directly (its public
 # server blocks browser-origin bursts with HTTP 429). Override the User-Agent with a
 # real contact per OSM policy; point CAR_ORDER_NOMINATIM_URL at a self-hosted
 # Nominatim to drop the rate limit entirely.
-CAR_ORDER_NOMINATIM_URL = env("CAR_ORDER_NOMINATIM_URL", default="https://nominatim.openstreetmap.org")
-CAR_ORDER_GEOCODER_USER_AGENT = env(
+CAR_ORDER_NOMINATIM_URL = config(
+    "CAR_ORDER_NOMINATIM_URL", default="https://nominatim.openstreetmap.org"
+)
+CAR_ORDER_GEOCODER_USER_AGENT = config(
     "CAR_ORDER_GEOCODER_USER_AGENT", default="ark-car-orders/1.0 (+https://ark.glob.uz)"
 )
-CAR_ORDER_GEOCODE_CACHE_TTL = env.int("CAR_ORDER_GEOCODE_CACHE_TTL", default=24 * 60 * 60)
+CAR_ORDER_GEOCODE_CACHE_TTL = config("CAR_ORDER_GEOCODE_CACHE_TTL", default=24 * 60 * 60, cast=int)
 
 # Arrival geofence (server-side): the driver may mark «at_client» / «at_destination»
 # only within this many metres of the point AND with a fresh GPS fix. 0 disables it
 # (handy for testing without being physically at the point).
-CAR_ORDER_ARRIVAL_GEOFENCE_M = env.int("CAR_ORDER_ARRIVAL_GEOFENCE_M", default=100)
+CAR_ORDER_ARRIVAL_GEOFENCE_M = config("CAR_ORDER_ARRIVAL_GEOFENCE_M", default=100, cast=int)
 # A GPS fix older than this (seconds) is too stale to confirm arrival.
-CAR_ORDER_GPS_FRESH_S = env.int("CAR_ORDER_GPS_FRESH_S", default=120)
+CAR_ORDER_GPS_FRESH_S = config("CAR_ORDER_GPS_FRESH_S", default=120, cast=int)
 # Pickup-wait limit (seconds): once the driver has waited at the client this long
 # (trip_state=at_client), the order is flagged `wait_overdue` and the clients surface
 # a manual «Клиент не вышел — отменить» action. No auto-cancel — a human decides.
-CAR_ORDER_PICKUP_WAIT_LIMIT_S = env.int("CAR_ORDER_PICKUP_WAIT_LIMIT_S", default=30 * 60)
+CAR_ORDER_PICKUP_WAIT_LIMIT_S = config("CAR_ORDER_PICKUP_WAIT_LIMIT_S", default=30 * 60, cast=int)
 
 
 # Backend auto-dispatch worker (`manage.py auto_dispatch`). Assigns awaiting orders
 # to the nearest free driver server-side, so it works with no dispatcher tab open.
-AUTO_DISPATCH_ENABLED = env.bool("AUTO_DISPATCH_ENABLED", default=True)
+AUTO_DISPATCH_ENABLED = config("AUTO_DISPATCH_ENABLED", default=True, cast=bool)
 # Assign a SCHEDULED order this many minutes before its pickup time.
-AUTO_DISPATCH_LEAD_MIN = env.int("AUTO_DISPATCH_LEAD_MIN", default=45)
+AUTO_DISPATCH_LEAD_MIN = config("AUTO_DISPATCH_LEAD_MIN", default=45, cast=int)
 # Assign an ASAP order once it has waited this long unclaimed.
-AUTO_DISPATCH_STALE_SEC = env.int("AUTO_DISPATCH_STALE_SEC", default=180)
+AUTO_DISPATCH_STALE_SEC = config("AUTO_DISPATCH_STALE_SEC", default=180, cast=int)
 # Ignore driver GPS fixes older than this when ranking by distance.
-AUTO_DISPATCH_POS_MAX_AGE = env.int("AUTO_DISPATCH_POS_MAX_AGE", default=180)
+AUTO_DISPATCH_POS_MAX_AGE = config("AUTO_DISPATCH_POS_MAX_AGE", default=180, cast=int)
 # Auto-reap abandoned pins: free a driver stuck on an ASSIGNED order they never started
 # and have gone dark on (no GPS this long → app closed / shift left), requeuing it for
 # someone online. 0 disables. Generous so an online driver (who heartbeats even while
 # parked) is never reaped — only a truly-gone one. Lower it (e.g. 300) for fast tests.
-CAR_ORDER_ABANDON_SEC = env.int("CAR_ORDER_ABANDON_SEC", default=60 * 60)
+CAR_ORDER_ABANDON_SEC = config("CAR_ORDER_ABANDON_SEC", default=60 * 60, cast=int)
 
 # Driver GPS simulator (`manage.py auto_simulate`). OFF by default now that real
 # phones stream their position to /drivers/me/location/ — the fake feed would fight
 # the real one. Set AUTO_SIMULATE_ENABLED=1 (or pass --force) only to test tracking
 # without a phone.
-AUTO_SIMULATE_ENABLED = env.bool("AUTO_SIMULATE_ENABLED", default=False)
+AUTO_SIMULATE_ENABLED = config("AUTO_SIMULATE_ENABLED", default=False, cast=bool)
 
 # Print a console line for each driver GPS heartbeat + trip-state change, so you
 # can watch in real time what the mobile app sends. Set LOG_TRACKING=0 to silence.
-LOG_TRACKING = env.bool("LOG_TRACKING", default=True)
+LOG_TRACKING = config("LOG_TRACKING", default=True, cast=bool)
 
 
 # CORS — allow the Vite dev frontend (ark_yandex_front) to call the API.
-CORS_ALLOWED_ORIGINS = env(
+CORS_ALLOWED_ORIGINS = config(
     "CORS_ALLOWED_ORIGINS",
-    default=["http://localhost:5173", "http://127.0.0.1:5173"],
+    default="http://localhost:5173,http://127.0.0.1:5173",
+    cast=Csv(),
 )
 CORS_ALLOW_CREDENTIALS = True
 # Dev only: let a teammate on the same LAN (private 192.168.x / 10.x / 172.16-31.x
@@ -317,7 +328,7 @@ if DEBUG:
 
 # Simple JWT — same token shape/lifetimes as ark-backend's auth_core.
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=env.int("JWT_ACCESS_HOURS", default=24)),
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=config("JWT_ACCESS_HOURS", default=24, cast=int)),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": False,

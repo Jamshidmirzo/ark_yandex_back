@@ -1,10 +1,10 @@
 # Droplet bundle — Vercel hosts the frontend, so NO frontend service here.
-# Services: redis, backend, dispatcher, caddy.
+# Services: redis, db (Postgres), geodb (PostGIS), backend, dispatcher, caddy.
 # Backend is NOT published to the host (expose, not ports) — only Caddy reaches
 # it over the compose network. Caddy terminates TLS and publishes 80 + 443.
 #
-# Requires a sibling .env (gitignored) that sets SECRET_KEY — see the runbook.
-# Run from the repo root on the droplet:
+# Requires a sibling .env (gitignored) that sets SECRET_KEY + POSTGRES_PASSWORD —
+# see the runbook. Run from the repo root on the droplet:
 #   docker compose -f docker-compose.deploy.yml up -d --build
 services:
   # Shared channel layer for WebSockets — lets the auto-dispatch WORKER (a
@@ -14,13 +14,51 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
 
+  # Primary DB (plain Postgres — identical to upstream ark-backend).
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a sibling .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ark -d ark_yandex"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Telemetry DB (PostGIS) — DriverPosition + OrderLiveLocation only (GeoRouter).
+  geodb:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ark_geo
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a sibling .env}
+    volumes:
+      - geo_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ark -d ark_geo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   backend:
     build:
       context: .
     image: ark-yandex-backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: sqlite:////data/db.sqlite3
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a sibling .env}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      GEO_POSTGRES_DB: ark_geo
+      GEO_POSTGRES_HOST: geodb
       # MANDATORY: exact Vercel origin, no trailing slash. CORS_ALLOW_CREDENTIALS
       # is True in settings.py so a wildcard is impossible — this exact string is
       # the only thing that lets the browser API calls through.
@@ -38,16 +76,15 @@ services:
       # Real backend (DEV/demo) — ALL /api/v1/* is reverse-proxied here.
       UPSTREAM_API_BASE: https://demo.ark.glob.uz/ru/api/v1
       # Durable, cross-process WS channel layer (channels_redis).
-      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     # expose (NOT ports): 8000 is reachable only by Caddy over the compose
     # network, never on the public IPv4/IPv6.
     expose:
       - "8000"
-    volumes:
-      - backend_data:/data
     # Lets the dispatcher wait for migrations/seed to finish (avoids the
-    # cold-start race where it polls a not-yet-migrated SQLite). /health/ is a
-    # no-auth endpoint served by daphne once it is up.
+    # cold-start race where it polls not-yet-migrated DBs). /health/ is a no-auth
+    # endpoint served by gunicorn+UvicornWorker once it is up.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/health/').status==200 else sys.exit(1)"]
       interval: 10s
@@ -55,28 +92,42 @@ services:
       retries: 6
       start_period: 40s
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+      geodb:
+        condition: service_healthy
 
-  # Server-side auto-dispatch worker. Reuses the backend image, shares its DB
-  # volume + redis so its WS group_sends reach the web process. Serves no HTTP.
-  # Its command: overrides the entrypoint, so it does NOT run migrations itself
-  # — it waits for backend to be healthy first.
+  # Server-side auto-dispatch worker. Reuses the backend image, shares Postgres +
+  # redis so its WS group_sends reach the web process. Serves no HTTP. Its command:
+  # overrides the entrypoint, so it does NOT run migrations itself — it waits for
+  # backend to be healthy first.
   dispatcher:
     image: ark-yandex-backend
     restart: unless-stopped
     command: ["python", "manage.py", "auto_dispatch"]
     environment:
-      DATABASE_URL: sqlite:////data/db.sqlite3
+      POSTGRES_DB: ark_yandex
+      POSTGRES_USER: ark
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in a sibling .env}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      GEO_POSTGRES_DB: ark_geo
+      GEO_POSTGRES_HOST: geodb
       AUTO_DISPATCH_ENABLED: "true"
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in a sibling .env (see runbook)}
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - backend_data:/data
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     depends_on:
       backend:
         condition: service_healthy
       redis:
         condition: service_started
+      db:
+        condition: service_healthy
+      geodb:
+        condition: service_healthy
 
   # TLS termination + reverse proxy. Auto-issues a Let's Encrypt cert for the
   # nip.io host and transparently upgrades WebSockets. Persists certs in named
@@ -96,6 +147,7 @@ services:
       - backend
 
 volumes:
-  backend_data:
+  db_data:
+  geo_data:
   caddy_data:
   caddy_config:

@@ -7,6 +7,25 @@ import config.auth as demo_auth
 from car_orders.services import routing
 
 
+def pytest_collection_modifyitems(items):
+    """Grant every DB-touching test access to BOTH databases (default + geo).
+
+    The telemetry models (DriverPosition, OrderLiveLocation) live in the `geo`
+    PostGIS database (car_orders.routers.GeoRouter); without this a test that queries
+    them fails with «Database queries to 'geo' are not allowed». Tests declare a bare
+    ``@pytest.mark.django_db`` per function, so rather than editing every decorator we
+    merge ``databases`` into the closest marker (preserving transaction/
+    reset_sequences). An explicit ``databases=`` on a test is respected as-is.
+    """
+    all_dbs = ("default", "geo")
+    for item in items:
+        marker = item.get_closest_marker("django_db")
+        if marker is None or marker.kwargs.get("databases") is not None:
+            continue
+        kwargs = {**marker.kwargs, "databases": all_dbs}
+        item.add_marker(pytest.mark.django_db(*marker.args, **kwargs), append=False)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_route_cache():
     """The OSRM route memo is a process-global dict; clear it around every test so a

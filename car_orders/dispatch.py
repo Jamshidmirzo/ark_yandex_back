@@ -17,6 +17,7 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib.gis.geos import Point
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -259,14 +260,23 @@ def fill_missing_addresses(limit=2):
     return filled
 
 
-def fresh_positions(max_age_sec, now=None):
-    """driver_id → (lat, lng) for drivers with a GPS fix newer than max_age."""
+def fresh_positions(max_age_sec, now=None, *, near=None, within_m=None):
+    """driver_id → (lat, lng) for drivers with a GPS fix newer than max_age.
+
+    When ``near=(lat, lng)`` is given, candidates are pre-filtered/ordered by
+    proximity via the PostGIS GiST index (DriverPositionQuerySet.near) — so a caller
+    that knows the pickup only materialises drivers actually near it. ``within_m``
+    optionally caps the search radius (metres). Ranking itself stays in Python
+    (rank_drivers) for parity with the frontend, so this is purely a candidate
+    pre-filter; the default (no ``near``) keeps the full-snapshot behaviour the
+    auto-dispatch pass relies on.
+    """
     now = now or timezone.now()
     cutoff = now - timedelta(seconds=max_age_sec)
-    return {
-        p.driver_id: (p.lat, p.lng)
-        for p in DriverPosition.objects.filter(last_seen__gte=cutoff)
-    }
+    qs = DriverPosition.objects.fresh(cutoff)
+    if near is not None:
+        qs = qs.near(Point(near[1], near[0], srid=4326), within_m=within_m)  # (lng, lat)
+    return {p.driver_id: (p.lat, p.lng) for p in qs}
 
 
 def queue_orders():

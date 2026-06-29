@@ -61,11 +61,11 @@ def test_c3_meta_mass_assign_open_in_dev_posture():
 # ---- C2: блокировки строк — no-op на дефолтной БД ---------------------------
 
 @pytest.mark.django_db
-def test_c2_select_for_update_is_noop_on_sqlite():
-    """На SQLite (дефолт) `SELECT ... FOR UPDATE` молча игнорируется, поэтому
-    row-lock в overlay.claim / dispatch.claim не защищает ничего."""
+def test_c2_select_for_update_supported_on_postgres():
+    """ИСПРАВЛЕНО (C2): дефолтная БД теперь Postgres, поэтому `SELECT ... FOR UPDATE`
+    реально берёт row-lock в overlay.claim / dispatch.claim. На SQLite он молча
+    игнорировался (no-op) — оставляем обе ветки на случай прогона на SQLite."""
     if connection.vendor == "sqlite":
-        # ПОСЛЕ перехода на Postgres станет True — тогда хотя бы однострочная защита есть.
         assert connection.features.has_select_for_update is False
     else:
         assert connection.features.has_select_for_update is True

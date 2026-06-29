@@ -1,8 +1,14 @@
 #!/bin/sh
 set -e
 
-echo "→ migrate"
+echo "→ migrate (default)"
 python manage.py migrate --noinput
+# Telemetry split: the geo DB holds ONLY DriverPosition + OrderLiveLocation (routed
+# by car_orders.routers.GeoRouter). Its tables are never created on `default`, so it
+# must be migrated explicitly. Only the backend runs this — the dispatcher worker
+# overrides the entrypoint and waits for backend to be healthy.
+echo "→ migrate (geo / PostGIS)"
+python manage.py migrate --database=geo --noinput
 
 echo "→ seed demo data (idempotent)"
 python manage.py shell -c "
@@ -48,8 +54,14 @@ if CarOrder.objects.count() == 0:
 print('seed ok | logins: admin/admin12345, dispatcher/dispatcher12345, requester/requester12345, driver/driver12345')
 "
 
-# Serve ASGI (HTTP + WebSocket) via daphne — gunicorn/WSGI can't speak WebSocket,
-# and the live map / auto-dispatch push depends on it. HTTP (incl. the gateway)
-# still goes through Django; WS is routed by config/asgi.py.
-echo "→ daphne :8000 (ASGI: HTTP + WebSocket)"
-exec daphne -b 0.0.0.0 -p 8000 config.asgi:application
+# Serve ASGI (HTTP + WebSocket) via gunicorn + UvicornWorker — same as ark-backend.
+# gunicorn manages the worker pool / graceful restarts; the UvicornWorker speaks
+# ASGI so HTTP (incl. the gateway) AND WebSocket (live map / auto-dispatch push,
+# routed by config/asgi.py) both work. With >1 worker the cross-process WS groups
+# require the Redis channel layer (REDIS_HOST/REDIS_PORT).
+echo "→ gunicorn+uvicorn :8000 (ASGI: HTTP + WebSocket)"
+exec gunicorn config.asgi:application \
+  -k uvicorn.workers.UvicornWorker \
+  --bind 0.0.0.0:8000 \
+  --workers 4 \
+  --timeout 120
